@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "Visualping Cloud Jobs",
+  "version": "0.1.0",
+  "description": "Help create and manage Visualping Cloud monitoring jobs from the current page and keep their cookie state synced.",
+  "permissions": [
+    "cookies",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://visualping.io/*",
+    "https://*.visualping.io/*",
+    "https://*.api.visualping.io/*",
+    "https://localhost:3000/*",
+    "http://localhost:3000/*",
+    "https://127.0.0.1/*",
+    "http://127.0.0.1/*"
+  ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Visualping Cloud Jobs",
+    "default_popup": "popup.html"
+  }
+}
