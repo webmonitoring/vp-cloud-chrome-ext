@@ -14,6 +14,7 @@ const uiState = {
     error: "",
     togglingJobId: null,
   },
+  createWorkspaceId: "",
 };
 
 let jobsRequestId = 0;
@@ -115,6 +116,18 @@ function renderCreateTab() {
       return `<option value="${escapeHtml(option.value)}" ${selected}>${escapeHtml(option.label)}</option>`;
     })
     .join("");
+  const workspaceOptions = (state.workspaces ?? [])
+    .map((workspace) => {
+      const selected = String(workspace.id) === String(uiState.createWorkspaceId) ? "selected" : "";
+      return `<option value="${escapeHtml(String(workspace.id))}" ${selected}>${escapeHtml(workspace.name)}</option>`;
+    })
+    .join("");
+  const workspaceSelect = workspaceOptions
+    ? `<label>
+        Workspace
+        <select id="create-workspace">${workspaceOptions}</select>
+      </label>`
+    : `<p class="muted">Workspace lookup currently unavailable.</p>`;
 
   return `
     <section class="page-card">
@@ -128,6 +141,8 @@ function renderCreateTab() {
         Alert me when
         <textarea id="alert-condition" name="alertCondition" placeholder="Price drops below $500, stock is back, a new job posting appears…" required></textarea>
       </label>
+
+      ${workspaceSelect}
 
       <label>
         Frequency of checking
@@ -318,6 +333,12 @@ async function refreshPopupState() {
   if (!state?.supportedPage && state?.loggedIn && uiState.activeTab === "create") {
     uiState.activeTab = "jobs";
   }
+
+  const availableWorkspaces = (state?.workspaces ?? []).map((workspace) => workspace.id);
+  if (!availableWorkspaces.includes(Number(uiState.createWorkspaceId))) {
+    const defaultId = state?.preferredWorkspaceId ?? availableWorkspaces[0] ?? "";
+    uiState.createWorkspaceId = defaultId ? String(defaultId) : "";
+  }
 }
 
 async function loadJobsPage() {
@@ -400,11 +421,16 @@ async function handleCreateJobSubmit(event) {
   submitButton.disabled = true;
   submitButton.textContent = "Creating…";
 
+  const workspaceIdValue = Number(uiState.createWorkspaceId);
+  const workspaceId =
+    Number.isFinite(workspaceIdValue) && workspaceIdValue > 0 ? workspaceIdValue : undefined;
+
   const response = await chrome.runtime.sendMessage({
     type: "create-job",
     payload: {
       alertCondition,
       interval,
+      workspaceId,
     },
   });
 
@@ -522,6 +548,10 @@ function bindEvents() {
 
   document.querySelector("#create-job-form")?.addEventListener("submit", (event) => {
     void handleCreateJobSubmit(event);
+  });
+
+  document.querySelector("#create-workspace")?.addEventListener("change", (event) => {
+    uiState.createWorkspaceId = event.target.value;
   });
 
   document.querySelector("#jobs-name-filter")?.addEventListener("input", (event) => {

@@ -368,6 +368,19 @@ async function buildPopupState() {
   const tab = await getActiveTab();
   const loginUrl = buildLoginUrl(config);
   const session = await checkVisualpingSession(config);
+  const workspaceRecords = (session.user?.workspaces ?? [])
+    .map((workspace) => {
+      const id = Number(workspace.id);
+      return Number.isFinite(id)
+        ? {
+            id,
+            name: workspace.name ?? `Workspace ${workspace.id}`,
+            role: workspace.role ?? "",
+          }
+        : null;
+    })
+    .filter(Boolean);
+  const preferredWorkspaceId = getPreferredWorkspaceId(session);
 
   if (!tab || !isSupportedTabUrl(tab.url)) {
     return {
@@ -377,6 +390,8 @@ async function buildPopupState() {
       loginUrl,
       frequencyOptions: DEFAULT_FREQUENCY_OPTIONS,
       sessionError: session.error ?? null,
+      workspaces: workspaceRecords,
+      preferredWorkspaceId,
     };
   }
 
@@ -397,10 +412,12 @@ async function buildPopupState() {
     trackedJobs: trackedJobsSummary(trackedJobs),
     frequencyOptions: DEFAULT_FREQUENCY_OPTIONS,
     sessionError: session.error ?? null,
+    workspaces: workspaceRecords,
+    preferredWorkspaceId,
   };
 }
 
-async function createJobForActiveTab({ alertCondition, interval }) {
+async function createJobForActiveTab({ alertCondition, interval, workspaceId: requestedWorkspaceId } = {}) {
   const config = await loadPublicConfig();
   const tab = await getActiveTab();
 
@@ -416,7 +433,9 @@ async function createJobForActiveTab({ alertCondition, interval }) {
 
   const session = await requireSession(config);
   const cookies = await getCookiesForPage(tab.url);
-  const workspaceId = getPreferredWorkspaceId(session);
+  const workspaceId = Number.isFinite(Number(requestedWorkspaceId))
+    ? Number(requestedWorkspaceId)
+    : getPreferredWorkspaceId(session);
   const payload = buildCreateJobPayload({
     url: tab.url,
     title: tab.title,
