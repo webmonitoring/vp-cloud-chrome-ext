@@ -148,6 +148,16 @@ function getOrganisationId(session) {
   return Number.isInteger(numericOrganisationId) && numericOrganisationId > 0 ? numericOrganisationId : null;
 }
 
+function getPreferredWorkspaceId(session) {
+  const workspaces = session.user?.workspaces ?? [];
+  if (!workspaces.length) {
+    return null;
+  }
+
+  const preferred = workspaces.find((workspace) => workspace.role !== "VIEWER");
+  return Number(preferred?.id ?? workspaces[0]?.id) || null;
+}
+
 function normalizeJobsQuery(payload = {}) {
   const pageIndex = Math.max(0, Number(payload.pageIndex) || 0);
   const requestedPageSize = Number(payload.pageSize) || DEFAULT_JOBS_PAGE_SIZE;
@@ -406,12 +416,14 @@ async function createJobForActiveTab({ alertCondition, interval }) {
 
   const session = await requireSession(config);
   const cookies = await getCookiesForPage(tab.url);
+  const workspaceId = getPreferredWorkspaceId(session);
   const payload = buildCreateJobPayload({
     url: tab.url,
     title: tab.title,
     alertCondition,
     interval,
     cookies,
+    workspaceId,
   });
 
   const response = await createVisualpingJob(config, session.token, payload);
@@ -462,7 +474,9 @@ async function toggleCookieSyncForJob(payload = {}) {
     throw new Error("Cookie sync only works for http:// or https:// jobs.");
   }
 
-  await ensureSitePermission(url);
+  if (!(await hasSitePermission(url))) {
+    throw new Error("Site permission is required to read and sync that page's cookies.");
+  }
 
   const session = await requireSession(config);
   const cookies = await getCookiesForPage(url);
@@ -470,7 +484,13 @@ async function toggleCookieSyncForJob(payload = {}) {
   const trackedJob = await getTrackedJob(jobId);
   const host = getHostname(url);
 
-  await updateVisualpingJob(config, session.token, jobId, buildCookieSyncPayload(jobId, cookies));
+  const workspaceId = getPreferredWorkspaceId(session);
+  await updateVisualpingJob(
+    config,
+    session.token,
+    jobId,
+    buildCookieSyncPayload({ jobId, cookies, workspaceId })
+  );
 
   await upsertTrackedJob({
     ...trackedJob,
@@ -523,7 +543,13 @@ async function syncCookiesForJob(jobId) {
   }
 
   const cookies = await getCookiesForPage(trackedJob.url);
-  await updateVisualpingJob(config, session.token, trackedJob.jobId, buildCookieSyncPayload(jobId, cookies));
+  const workspaceId = getPreferredWorkspaceId(session);
+  await updateVisualpingJob(
+    config,
+    session.token,
+    trackedJob.jobId,
+    buildCookieSyncPayload({ jobId, cookies, workspaceId })
+  );
 
   await updateTrackedJob(jobId, {
     status: STATUS.synced,

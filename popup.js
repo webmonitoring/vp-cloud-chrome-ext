@@ -257,7 +257,7 @@ function renderJobsTab() {
     </section>
 
     ${renderMessage(uiState.jobsFlash)}
-    ${uiState.jobs.error ? renderMessage({ type: "error", text: uiState.jobs.error }) : ""}
+    ${uiState.jobs.error ? renderMessage({ type: 'error', text: uiState.jobs.error }) : ""}
     ${loadingMessage}
     ${data ? renderJobsList(data.jobs ?? [], state.frequencyOptions) : ""}
 
@@ -277,6 +277,8 @@ function renderApp() {
     return;
   }
 
+  const focusedId = document.activeElement?.id ?? null;
+
   const createActive = uiState.activeTab === "create";
   app.innerHTML = `
     <div class="tabs">
@@ -287,10 +289,26 @@ function renderApp() {
   `;
 
   bindEvents();
+
+  if (focusedId) {
+    document.querySelector(`#${focusedId}`)?.focus();
+  }
 }
 
 function getCurrentJobFromList(jobId) {
   return uiState.jobs.data?.jobs?.find((job) => String(job.id) === String(jobId)) ?? null;
+}
+
+async function ensureTabPermission(url) {
+  const origin = new URL(url).origin;
+  const originPattern = `${origin}/*`;
+  const hasPermission = await chrome.permissions.contains({ origins: [originPattern] });
+  if (!hasPermission) {
+    const granted = await chrome.permissions.request({ origins: [originPattern] });
+    if (!granted) {
+      throw new Error("Site permission is required to read and sync that page's cookies.");
+    }
+  }
 }
 
 async function refreshPopupState() {
@@ -357,11 +375,25 @@ async function handleCreateJobSubmit(event) {
 
   if (!alertCondition) {
     uiState.createFlash = {
-      type: "error",
-      text: "“Alert me when” cannot be empty.",
+      type: 'error',
+      text: '"Alert me when" cannot be empty.',
     };
     renderApp();
     return;
+  }
+
+  const tabUrl = uiState.popupState?.tab?.url;
+  if (tabUrl) {
+    try {
+      await ensureTabPermission(tabUrl);
+    } catch (error) {
+      uiState.createFlash = {
+        type: 'error',
+        text: error instanceof Error ? error.message : 'Site permission required.',
+      };
+      renderApp();
+      return;
+    }
   }
 
   const submitButton = app.querySelector("#submit-button");
@@ -378,7 +410,7 @@ async function handleCreateJobSubmit(event) {
 
   if (!response?.ok) {
     uiState.createFlash = {
-      type: "error",
+      type: 'error',
       text: response?.error ?? "Job creation failed.",
     };
     renderApp();
@@ -418,6 +450,21 @@ async function handleToggleCookieSync(jobId) {
     return;
   }
 
+  const enabling = !job.cookieSyncEnabled;
+
+  if (enabling) {
+    try {
+      await ensureTabPermission(job.url);
+    } catch (error) {
+      uiState.jobsFlash = {
+        type: 'error',
+        text: error instanceof Error ? error.message : "Site permission required.",
+      };
+      renderApp();
+      return;
+    }
+  }
+
   uiState.jobs.togglingJobId = job.id;
   uiState.jobsFlash = null;
   renderApp();
@@ -425,7 +472,7 @@ async function handleToggleCookieSync(jobId) {
   const response = await chrome.runtime.sendMessage({
     type: "toggle-cookie-sync",
     payload: {
-      enabled: !job.cookieSyncEnabled,
+      enabled: enabling,
       job,
     },
   });
@@ -434,7 +481,7 @@ async function handleToggleCookieSync(jobId) {
 
   if (!response?.ok) {
     uiState.jobsFlash = {
-      type: "error",
+      type: 'error',
       text: response?.error ?? "Cookie sync update failed.",
     };
     renderApp();
