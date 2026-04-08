@@ -10,12 +10,14 @@ import {
   upsertTrackedJob,
 } from "./lib/storage.js";
 import {
+  buildScriptActionPreactions,
   buildCookieSyncPayload,
   buildCreateJobPayload,
   buildLoginUrl,
   checkVisualpingSession,
   cookieMatchesHost,
   createVisualpingJob,
+  getVisualpingJob,
   listVisualpingJobs,
   listVisualpingLabels,
   updateVisualpingJob,
@@ -23,6 +25,8 @@ import {
 
 const DEFAULT_JOBS_PAGE_SIZE = 10;
 const syncState = new Map();
+const SCRIPT_GENERATOR_CONTEXT_PREFIX = "scriptGeneratorContext:";
+const SCRIPT_GENERATOR_LATEST_CONTEXT_KEY = "scriptGeneratorContextLatest";
 
 function isSupportedTabUrl(url) {
   if (!url) {
@@ -50,6 +54,55 @@ function safeParseUrl(url) {
 
 function getHostname(url) {
   return safeParseUrl(url)?.hostname ?? "";
+}
+
+function scriptGeneratorContextKey(tabId) {
+  return `${SCRIPT_GENERATOR_CONTEXT_PREFIX}${tabId}`;
+}
+
+function buildScriptGeneratorPanelPath(context) {
+  const params = new URLSearchParams();
+  params.set("jobId", String(context.jobId));
+  params.set("url", String(context.url));
+
+  if (context.description) {
+    params.set("description", String(context.description));
+  }
+
+  if (Number.isInteger(Number(context.tabId)) && Number(context.tabId) > 0) {
+    params.set("tabId", String(context.tabId));
+  }
+
+  return `script_generator.html?${params.toString()}`;
+}
+
+async function setScriptGeneratorContext(tabId, context) {
+  await chrome.storage.session.set({
+    [scriptGeneratorContextKey(tabId)]: context,
+    [SCRIPT_GENERATOR_LATEST_CONTEXT_KEY]: context,
+  });
+}
+
+async function getScriptGeneratorContext(tabId) {
+  const result = await chrome.storage.session.get(scriptGeneratorContextKey(tabId));
+  return result[scriptGeneratorContextKey(tabId)] ?? null;
+}
+
+async function getLatestScriptGeneratorContext() {
+  const latestResult = await chrome.storage.session.get(SCRIPT_GENERATOR_LATEST_CONTEXT_KEY);
+  const latestContext = latestResult[SCRIPT_GENERATOR_LATEST_CONTEXT_KEY];
+  if (latestContext && typeof latestContext === "object") {
+    return latestContext;
+  }
+
+  const all = await chrome.storage.session.get(null);
+  return Object.entries(all)
+    .filter(([key]) => key.startsWith(SCRIPT_GENERATOR_CONTEXT_PREFIX))
+    .map(([, value]) => value)
+    .filter((value) => value && typeof value === "object")
+    .sort((left, right) => {
+      return new Date(right.openedAt ?? 0).getTime() - new Date(left.openedAt ?? 0).getTime();
+    })[0] ?? null;
 }
 
 function toNumberOrNull(value) {
@@ -502,13 +555,20 @@ async function toggleCookieSyncForJob(payload = {}) {
   const now = new Date().toISOString();
   const trackedJob = await getTrackedJob(jobId);
   const host = getHostname(url);
-
   const workspaceId = getPreferredWorkspaceId(session);
+  const jobDetails = await getVisualpingJob(config, session.token, jobId, {
+    workspaceId: workspaceId ?? undefined,
+  });
   await updateVisualpingJob(
     config,
     session.token,
     jobId,
-    buildCookieSyncPayload({ jobId, cookies, workspaceId })
+    buildCookieSyncPayload({
+      jobId,
+      cookies,
+      workspaceId,
+      existingPreactions: jobDetails.preactions,
+    })
   );
 
   await upsertTrackedJob({
@@ -563,11 +623,19 @@ async function syncCookiesForJob(jobId) {
 
   const cookies = await getCookiesForPage(trackedJob.url);
   const workspaceId = getPreferredWorkspaceId(session);
+  const jobDetails = await getVisualpingJob(config, session.token, trackedJob.jobId, {
+    workspaceId: workspaceId ?? undefined,
+  });
   await updateVisualpingJob(
     config,
     session.token,
     trackedJob.jobId,
-    buildCookieSyncPayload({ jobId, cookies, workspaceId })
+    buildCookieSyncPayload({
+      jobId,
+      cookies,
+      workspaceId,
+      existingPreactions: jobDetails.preactions,
+    })
   );
 
   await updateTrackedJob(jobId, {
@@ -576,6 +644,243 @@ async function syncCookiesForJob(jobId) {
     lastSyncedAt: new Date().toISOString(),
     lastError: null,
   });
+}
+
+async function openScriptGeneratorForJob(payload = {}) {
+  const jobId = Number(payload.jobId);
+  if (!Number.isInteger(jobId) || jobId <= 0) {
+    throw new Error("A valid Visualping job id is required.");
+  }
+
+  const url = String(payload.url ?? "").trim();
+  if (!isSupportedTabUrl(url)) {
+    throw new Error("Script generation requires an http:// or https:// job URL.");
+  }
+
+  if (!chrome.sidePanel?.setOptions || !chrome.sidePanel?.open) {
+    throw new Error("This Chrome version does not support extension side panels.");
+  }
+
+  const shouldOpenPanel = payload.openPanel !== false;
+  const requestedTabId = Number(payload.tabId);
+  const hasRequestedTabId = Number.isInteger(requestedTabId) && requestedTabId > 0;
+  const requestedWindowId = Number(payload.windowId);
+  const hasRequestedWindowId = Number.isInteger(requestedWindowId) && requestedWindowId >= 0;
+
+  let panelOpened = false;
+  let lastOpenError = null;
+
+  if (shouldOpenPanel && hasRequestedWindowId) {
+    try {
+      await chrome.windows.update(requestedWindowId, {
+        focused: true,
+      });
+    } catch (_error) {
+      // Non-fatal; keep trying to open panel.
+    }
+
+    try {
+      await chrome.sidePanel.open({
+        windowId: requestedWindowId,
+      });
+      panelOpened = true;
+      console.info("Script generator panel opened via requested window.", {
+        requestedWindowId,
+      });
+    } catch (error) {
+      lastOpenError = error;
+      console.warn("Failed to open script generator panel via requested window.", {
+        requestedWindowId,
+        error: formatError(error),
+      });
+    }
+  }
+
+  let tab = null;
+  if (hasRequestedTabId) {
+    try {
+      tab = await chrome.tabs.get(requestedTabId);
+    } catch (error) {
+      throw new Error(`Could not find tab #${requestedTabId} for script generation. ${formatError(error)}`);
+    }
+  }
+
+  if (!tab) {
+    tab = await chrome.tabs.create({
+      url,
+      active: true,
+      ...(hasRequestedWindowId ? { windowId: requestedWindowId } : {}),
+    });
+  }
+
+  if (!tab?.id) {
+    throw new Error("Unable to open a browser tab for this job.");
+  }
+
+  if (tab.url !== url) {
+    try {
+      await chrome.tabs.update(tab.id, {
+        url,
+      });
+    } catch (_error) {
+      // Best effort only.
+    }
+  }
+
+  if (Number.isInteger(tab.windowId)) {
+    try {
+      await chrome.windows.update(tab.windowId, {
+        focused: true,
+      });
+    } catch (_error) {
+      // Best effort only.
+    }
+  }
+
+  try {
+    await chrome.tabs.update(tab.id, {
+      active: true,
+    });
+  } catch (_error) {
+    // Best effort only.
+  }
+
+  const context = {
+    jobId,
+    url,
+    description: String(payload.description ?? ""),
+    openedAt: new Date().toISOString(),
+    tabId: tab.id,
+    windowId: tab.windowId ?? null,
+  };
+  const panelPath = buildScriptGeneratorPanelPath(context);
+
+  await setScriptGeneratorContext(tab.id, context);
+
+  await chrome.sidePanel.setOptions({
+    tabId: tab.id,
+    enabled: true,
+    path: panelPath,
+  });
+
+  if (!shouldOpenPanel) {
+    return {
+      ok: true,
+      tabId: tab.id,
+    };
+  }
+
+  if (!panelOpened) {
+    try {
+      await chrome.sidePanel.open({ tabId: tab.id });
+      panelOpened = true;
+      console.info("Script generator panel opened via tab.", {
+        tabId: tab.id,
+      });
+    } catch (error) {
+      lastOpenError = error;
+      console.warn("Failed to open script generator panel via tab.", {
+        tabId: tab.id,
+        error: formatError(error),
+      });
+    }
+  }
+
+  const windowIdsToTry = [tab.windowId, hasRequestedWindowId ? requestedWindowId : null]
+    .filter((windowId, index, all) => {
+      return Number.isInteger(windowId) && all.indexOf(windowId) === index;
+    });
+
+  for (const windowId of windowIdsToTry) {
+    if (panelOpened) {
+      break;
+    }
+
+    try {
+      await chrome.sidePanel.open({
+        windowId,
+      });
+      panelOpened = true;
+      console.info("Script generator panel opened via fallback window.", {
+        windowId,
+      });
+    } catch (error) {
+      lastOpenError = error;
+      console.warn("Failed to open script generator panel via fallback window.", {
+        windowId,
+        error: formatError(error),
+      });
+    }
+  }
+
+  if (!panelOpened) {
+    const details = lastOpenError ? formatError(lastOpenError) : "Unknown side panel error.";
+    throw new Error(
+      `Could not open side panel automatically. ${details}`
+    );
+  }
+
+  return {
+    ok: true,
+    tabId: tab.id,
+  };
+}
+
+async function getScriptGeneratorContextForTab(payload = {}) {
+  const requestedTabId = Number(payload.tabId);
+  const hasRequestedTabId = Number.isInteger(requestedTabId) && requestedTabId > 0;
+
+  const context = hasRequestedTabId ? await getScriptGeneratorContext(requestedTabId) : null;
+  const fallbackContext = context ?? (await getLatestScriptGeneratorContext());
+  if (!fallbackContext) {
+    return {
+      ok: false,
+      error: "No script generator context found for this tab. Start from the Jobs tab in the extension popup.",
+    };
+  }
+
+  return {
+    ok: true,
+    context: fallbackContext,
+  };
+}
+
+async function saveScriptActionForJob(payload = {}) {
+  const jobId = Number(payload.jobId);
+  if (!Number.isInteger(jobId) || jobId <= 0) {
+    throw new Error("A valid Visualping job id is required.");
+  }
+
+  const script = String(payload.script ?? "").trim();
+  if (!script) {
+    throw new Error("Generated script is empty.");
+  }
+
+  const config = await loadPublicConfig();
+  const session = await requireSession(config);
+  const workspaceId = getPreferredWorkspaceId(session);
+  const jobDetails = await getVisualpingJob(config, session.token, jobId, {
+    workspaceId: workspaceId ?? undefined,
+  });
+
+  const preactions = buildScriptActionPreactions(jobDetails.preactions, script);
+  const updatePayload = {
+    jobId,
+    enable_cookies_and_ad_blocker: true,
+    preactions,
+  };
+
+  if (workspaceId) {
+    updatePayload.workspaceId = workspaceId;
+  }
+
+  await updateVisualpingJob(config, session.token, jobId, updatePayload);
+
+  return {
+    ok: true,
+    jobId,
+    actionCount: preactions.actions.length,
+  };
 }
 
 function queueCookieSync(jobId) {
@@ -635,6 +940,19 @@ chrome.cookies.onChanged.addListener(async ({ cookie }) => {
   }
 });
 
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+  try {
+    await chrome.storage.session.remove(scriptGeneratorContextKey(tabId));
+
+    const latest = await chrome.storage.session.get(SCRIPT_GENERATOR_LATEST_CONTEXT_KEY);
+    if (Number(latest[SCRIPT_GENERATOR_LATEST_CONTEXT_KEY]?.tabId) === Number(tabId)) {
+      await chrome.storage.session.remove(SCRIPT_GENERATOR_LATEST_CONTEXT_KEY);
+    }
+  } catch (error) {
+    console.warn("Failed to clear script generator tab context.", error);
+  }
+});
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   (async () => {
     if (message?.type === "popup-state") {
@@ -669,6 +987,42 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === "toggle-cookie-sync") {
       try {
         sendResponse(await toggleCookieSyncForJob(message.payload ?? {}));
+      } catch (error) {
+        sendResponse({
+          ok: false,
+          error: formatError(error),
+        });
+      }
+      return;
+    }
+
+    if (message?.type === "open-script-generator") {
+      try {
+        sendResponse(await openScriptGeneratorForJob(message.payload ?? {}));
+      } catch (error) {
+        sendResponse({
+          ok: false,
+          error: formatError(error),
+        });
+      }
+      return;
+    }
+
+    if (message?.type === "script-generator-context") {
+      try {
+        sendResponse(await getScriptGeneratorContextForTab(message.payload ?? {}));
+      } catch (error) {
+        sendResponse({
+          ok: false,
+          error: formatError(error),
+        });
+      }
+      return;
+    }
+
+    if (message?.type === "save-script-action") {
+      try {
+        sendResponse(await saveScriptActionForJob(message.payload ?? {}));
       } catch (error) {
         sendResponse({
           ok: false,

@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Visualping Script Generator</title>
+    <link rel="stylesheet" href="script_generator.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="header">
+        <p class="eyebrow">Visualping</p>
+        <h1>Script Action Generator</h1>
+        <p id="job-context" class="context">Loading job context...</p>
+      </header>
+
+      <section class="panel">
+        <label for="action-request" class="label">What should happen on this page?</label>
+        <textarea
+          id="action-request"
+          placeholder="Example: Open the date filter, choose 'Last 7 days', and click Apply"
+        ></textarea>
+
+        <div class="actions">
+          <button id="generate-script" class="button-primary" type="button">Generate Script</button>
+          <button id="stop-generation" class="button-stop" type="button" disabled>Stop</button>
+          <button id="save-script" class="button-ghost" type="button" disabled>Save To Job</button>
+        </div>
+
+        <p id="status" class="status">Enter an action and generate a script.</p>
+        <pre id="thinking-log" class="thinking-log" aria-live="polite"></pre>
+      </section>
+
+      <section class="panel">
+        <label for="generated-script" class="label">Generated script</label>
+        <textarea id="generated-script" readonly placeholder="Generated script will appear here"></textarea>
+      </section>
+    </main>
+
+    <script type="module" src="script_generator.js"></script>
+  </body>
+</html>

@@ -6,7 +6,9 @@
   "permissions": [
     "cookies",
     "storage",
-    "tabs"
+    "tabs",
+    "scripting",
+    "sidePanel"
   ],
   "host_permissions": [
     "https://visualping.io/*",
@@ -24,6 +26,9 @@
   "background": {
     "service_worker": "background.js",
     "type": "module"
+  },
+  "side_panel": {
+    "default_path": "script_generator.html"
   },
   "action": {
     "default_title": "Visualping Cloud Jobs",

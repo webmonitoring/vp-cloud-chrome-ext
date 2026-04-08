@@ -13,6 +13,7 @@ const uiState = {
     data: null,
     error: "",
     togglingJobId: null,
+    openingScriptJobId: null,
   },
   createWorkspaceId: "",
 };
@@ -192,6 +193,9 @@ function renderJobsList(jobs, frequencyOptions) {
       const jobState = job.isActive === false ? "Paused" : "Active";
       const meta = [intervalLabel, job.mode, jobState].filter(Boolean).join(" · ");
       const error = job.lastError ? `<p class="job-item__error">${escapeHtml(job.lastError)}</p>` : "";
+      const openingScript = uiState.jobs.openingScriptJobId === job.id;
+      const scriptHint =
+        "If the monitored job needs clicks or actions to end up in the state that you want it to be, use this to add actions";
 
       return `
         <li class="job-item">
@@ -204,14 +208,27 @@ function renderJobsList(jobs, frequencyOptions) {
               <p class="job-item__status">${escapeHtml(syncStatus)}</p>
               ${error}
             </div>
-            <button
-              class="button-toggle ${toggleClass}"
-              data-job-id="${escapeHtml(String(job.id))}"
-              type="button"
-              ${uiState.jobs.togglingJobId === job.id ? "disabled" : ""}
-            >
-              ${escapeHtml(uiState.jobs.togglingJobId === job.id ? "Updating…" : toggleLabel)}
-            </button>
+            <div class="job-item__actions">
+              <div class="job-item__script-action">
+                <button
+                  class="button-ghost button-script-action"
+                  data-script-job-id="${escapeHtml(String(job.id))}"
+                  type="button"
+                  ${openingScript ? "disabled" : ""}
+                >
+                  ${escapeHtml(openingScript ? "Opening…" : "Add Script Action")}
+                </button>
+                <span class="info-hint" title="${escapeHtml(scriptHint)}" aria-label="${escapeHtml(scriptHint)}" tabindex="0">?</span>
+              </div>
+              <button
+                class="button-toggle ${toggleClass}"
+                data-job-id="${escapeHtml(String(job.id))}"
+                type="button"
+                ${uiState.jobs.togglingJobId === job.id ? "disabled" : ""}
+              >
+                ${escapeHtml(uiState.jobs.togglingJobId === job.id ? "Updating…" : toggleLabel)}
+              </button>
+            </div>
           </div>
         </li>
       `;
@@ -525,6 +542,72 @@ async function handleToggleCookieSync(jobId) {
   await loadJobsPage();
 }
 
+async function handleOpenScriptAction(jobId) {
+  const job = getCurrentJobFromList(jobId);
+  if (!job) {
+    return;
+  }
+
+  uiState.jobs.openingScriptJobId = job.id;
+  uiState.jobsFlash = null;
+  renderApp();
+
+  let panelOpenedFromGesture = false;
+  let panelGestureError = "";
+  if (chrome.sidePanel?.open) {
+    try {
+      await chrome.sidePanel.open({
+        windowId: chrome.windows.WINDOW_ID_CURRENT,
+      });
+      panelOpenedFromGesture = true;
+    } catch (error) {
+      panelGestureError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  try {
+    await ensureTabPermission(job.url);
+  } catch (error) {
+    uiState.jobsFlash = {
+      type: "error",
+      text: error instanceof Error ? error.message : "Site permission required.",
+    };
+    uiState.jobs.openingScriptJobId = null;
+    renderApp();
+    return;
+  }
+
+  const focusedWindow = await chrome.windows.getLastFocused({ populate: false });
+  const targetWindowId = focusedWindow?.id;
+
+  const response = await chrome.runtime.sendMessage({
+    type: "open-script-generator",
+    payload: {
+      jobId: job.id,
+      url: job.url,
+      description: job.description,
+      ...(Number.isInteger(targetWindowId) ? { windowId: targetWindowId } : {}),
+      openPanel: !panelOpenedFromGesture,
+    },
+  });
+
+  uiState.jobs.openingScriptJobId = null;
+
+  if (!response?.ok) {
+    const debugMessage = panelGestureError
+      ? ` Direct open failed: ${panelGestureError}`
+      : "";
+    uiState.jobsFlash = {
+      type: "error",
+      text: `${response?.error ?? "Could not open the script generator."}${debugMessage}`,
+    };
+    renderApp();
+    return;
+  }
+
+  window.close();
+}
+
 function scheduleJobsSearch(value) {
   uiState.jobs.nameFilter = value;
   uiState.jobs.pageIndex = 0;
@@ -587,6 +670,12 @@ function bindEvents() {
   document.querySelectorAll("[data-job-id]").forEach((button) => {
     button.addEventListener("click", () => {
       void handleToggleCookieSync(button.dataset.jobId);
+    });
+  });
+
+  document.querySelectorAll("[data-script-job-id]").forEach((button) => {
+    button.addEventListener("click", () => {
+      void handleOpenScriptAction(button.dataset.scriptJobId);
     });
   });
 }
