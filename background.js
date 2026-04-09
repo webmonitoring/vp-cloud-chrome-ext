@@ -1,4 +1,4 @@
-import { DEFAULT_FREQUENCY_OPTIONS, STATUS } from "./lib/constants.js";
+import { DEFAULT_FREQUENCY_OPTIONS, STATUS, STORAGE_KEYS } from "./lib/constants.js";
 import { loadPublicConfig } from "./lib/config.js";
 import {
   getTrackedJob,
@@ -27,6 +27,27 @@ const DEFAULT_JOBS_PAGE_SIZE = 10;
 const syncState = new Map();
 const SCRIPT_GENERATOR_CONTEXT_PREFIX = "scriptGeneratorContext:";
 const SCRIPT_GENERATOR_LATEST_CONTEXT_KEY = "scriptGeneratorContextLatest";
+const MONITOR_SUGGESTIONS_MODEL_OPTIONS = {
+  expectedInputs: [{ type: "text", languages: ["en"] }],
+  expectedOutputs: [{ type: "text", languages: ["en"] }],
+};
+const MONITOR_SUGGESTIONS_CACHE_TTL_MS = 20 * 60 * 1000;
+const MONITOR_SUGGESTIONS_MAX_COUNT = 5;
+const MONITOR_SUGGESTIONS_MAX_TEXT_CHARS = 2000;
+const ACTION_ICON_SIZES = [16, 32, 48];
+const ACTION_ICON_PATHS = Object.freeze({
+  16: "icons/icon-16.png",
+  32: "icons/icon-32.png",
+  48: "icons/icon-48.png",
+});
+const MONITOR_SUGGESTIONS_TRIGGER_DELAY_MS = 900;
+const monitorSuggestionsCache = new Map();
+const monitorSuggestionsPending = new Map();
+const iconAnimationState = new Map();
+const tabsWithSuggestionSignal = new Set();
+const lastSuggestionAnimationFingerprint = new Map();
+const monitorSuggestionsTriggerTimers = new Map();
+let actionIconBitmapsPromise;
 
 function isSupportedTabUrl(url) {
   if (!url) {
@@ -140,6 +161,17 @@ function trackedJobsSummary(trackedJobs) {
   });
 }
 
+async function getMonitorSuggestionsEnabled() {
+  const result = await chrome.storage.local.get(STORAGE_KEYS.monitorSuggestionsEnabled);
+  return result[STORAGE_KEYS.monitorSuggestionsEnabled] === true;
+}
+
+async function setMonitorSuggestionsEnabled(enabled) {
+  await chrome.storage.local.set({
+    [STORAGE_KEYS.monitorSuggestionsEnabled]: enabled === true,
+  });
+}
+
 async function getActiveTab() {
   const tabs = await chrome.tabs.query({
     active: true,
@@ -147,6 +179,777 @@ async function getActiveTab() {
   });
 
   return tabs[0] ?? null;
+}
+
+function clearMonitorSuggestionsTrigger(tabId) {
+  const existingTimer = monitorSuggestionsTriggerTimers.get(tabId);
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+    monitorSuggestionsTriggerTimers.delete(tabId);
+  }
+}
+
+async function maybeGenerateMonitorSuggestionsForTabId(tabId, reason) {
+  const enabled = await getMonitorSuggestionsEnabled();
+  if (!enabled) {
+    return;
+  }
+
+  let tab;
+  try {
+    tab = await chrome.tabs.get(tabId);
+  } catch (_error) {
+    return;
+  }
+
+  if (!tab?.active || !isSupportedTabUrl(tab.url)) {
+    return;
+  }
+
+  console.info("[monitor-suggestions] background-trigger", {
+    tabId,
+    tabUrl: tab.url,
+    reason,
+  });
+
+  const response = await getMonitorSuggestionsForTab(tab, {
+    forceRefresh: false,
+  });
+  console.info("[monitor-suggestions] background-trigger-result", {
+    tabId,
+    tabUrl: tab.url,
+    reason,
+    ok: response?.ok === true,
+    source: response?.source ?? null,
+    suggestionsCount: Array.isArray(response?.suggestions) ? response.suggestions.length : 0,
+    monitorabilityScore:
+      Number.isFinite(Number(response?.monitorabilityScore))
+        ? Number(response.monitorabilityScore)
+        : null,
+    errorCode: response?.errorCode ?? null,
+  });
+}
+
+function queueMonitorSuggestionsForTab(tabId, reason, delayMs = MONITOR_SUGGESTIONS_TRIGGER_DELAY_MS) {
+  if (!Number.isInteger(tabId) || tabId <= 0) {
+    return;
+  }
+
+  clearMonitorSuggestionsTrigger(tabId);
+  const timeoutId = setTimeout(() => {
+    monitorSuggestionsTriggerTimers.delete(tabId);
+    void maybeGenerateMonitorSuggestionsForTabId(tabId, reason);
+  }, delayMs);
+  monitorSuggestionsTriggerTimers.set(tabId, timeoutId);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function setTabSuggestionSignal(tabId, hasSuggestions) {
+  if (!Number.isInteger(tabId) || tabId <= 0) {
+    return;
+  }
+
+  if (hasSuggestions) {
+    tabsWithSuggestionSignal.add(tabId);
+  } else {
+    tabsWithSuggestionSignal.delete(tabId);
+  }
+}
+
+async function resetActionIcon(tabId) {
+  if (!Number.isInteger(tabId) || tabId <= 0 || !chrome.action?.setIcon) {
+    return;
+  }
+
+  try {
+    await chrome.action.setIcon({
+      tabId,
+      path: ACTION_ICON_PATHS,
+    });
+  } catch (error) {
+    console.warn("Failed to reset action icon.", error);
+  }
+}
+
+function stopActionIconAnimation(tabId, { reset = true, reason = "unspecified" } = {}) {
+  if (!iconAnimationState.has(tabId)) {
+    return;
+  }
+
+  iconAnimationState.delete(tabId);
+  console.info("[monitor-suggestions] icon-animation-stop", {
+    tabId,
+    reason,
+    reset,
+  });
+
+  if (reset) {
+    void resetActionIcon(tabId);
+  }
+}
+
+function stopAllActionIconAnimations(reason) {
+  for (const tabId of Array.from(iconAnimationState.keys())) {
+    stopActionIconAnimation(tabId, {
+      reset: true,
+      reason,
+    });
+  }
+}
+
+function stopActionIconAnimationsExcept(activeTabId, reason) {
+  for (const tabId of Array.from(iconAnimationState.keys())) {
+    if (Number(tabId) !== Number(activeTabId)) {
+      stopActionIconAnimation(tabId, {
+        reset: true,
+        reason,
+      });
+    }
+  }
+}
+
+function parseJsonCandidates(rawText) {
+  const text = String(rawText ?? "").trim();
+  if (!text) {
+    throw new Error("Model did not return content.");
+  }
+
+  const candidates = [text];
+  const fenced = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  if (fenced?.[1]) {
+    candidates.push(String(fenced[1]).trim());
+  }
+
+  const objectStart = text.indexOf("{");
+  const objectEnd = text.lastIndexOf("}");
+  if (objectStart !== -1 && objectEnd !== -1 && objectEnd > objectStart) {
+    candidates.push(text.slice(objectStart, objectEnd + 1));
+  }
+
+  const arrayStart = text.indexOf("[");
+  const arrayEnd = text.lastIndexOf("]");
+  if (arrayStart !== -1 && arrayEnd !== -1 && arrayEnd > arrayStart) {
+    candidates.push(text.slice(arrayStart, arrayEnd + 1));
+  }
+
+  let lastError = null;
+  for (const candidate of candidates) {
+    const normalized = String(candidate)
+      .replace(/^\s*json\s*/i, "")
+      .replace(/[“”]/g, "\"")
+      .replace(/[‘’]/g, "'")
+      .replace(/,\s*([}\]])/g, "$1")
+      .trim();
+
+    try {
+      return JSON.parse(normalized);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError ?? new Error("Could not parse model JSON.");
+}
+
+function normalizeMonitorSuggestion(value) {
+  let suggestion = String(value ?? "")
+    .trim()
+    .replace(/^["'`]+|["'`]+$/g, "")
+    .replace(/\s+/g, " ")
+    .replace(/^[\-\d.).\s]+/, "")
+    .replace(/^(notify me when|let me know when|alert me when|tell me when)\s+/i, "")
+    .replace(/^when\s+/i, "")
+    .replace(/[.?!]+$/g, "")
+    .trim();
+
+  if (!suggestion || suggestion.length < 4) {
+    return "";
+  }
+
+  if (suggestion.length > 110) {
+    suggestion = `${suggestion.slice(0, 107).trim()}...`;
+  }
+
+  return suggestion;
+}
+
+function normalizeSuggestionArray(values) {
+  if (!Array.isArray(values)) {
+    return [];
+  }
+
+  const seen = new Set();
+  const normalized = [];
+  for (const value of values) {
+    const suggestion = normalizeMonitorSuggestion(value);
+    if (!suggestion) {
+      continue;
+    }
+
+    const key = suggestion.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    normalized.push(suggestion);
+
+    if (normalized.length >= MONITOR_SUGGESTIONS_MAX_COUNT) {
+      break;
+    }
+  }
+
+  return normalized;
+}
+
+function normalizeMonitorabilityScore(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return 1;
+  }
+
+  return Math.min(10, Math.max(1, Math.round(numeric)));
+}
+
+function shouldAnimateForSuggestions({ suggestions, monitorabilityScore }) {
+  return Array.isArray(suggestions) && suggestions.length > 0 && Number(monitorabilityScore) >= 5;
+}
+
+function extractSuggestionsFromModelJson(parsed) {
+  if (Array.isArray(parsed)) {
+    return {
+      suggestions: normalizeSuggestionArray(parsed),
+      monitorabilityScore: 1,
+    };
+  }
+
+  if (parsed && typeof parsed === "object") {
+    const suggestions = Array.isArray(parsed.suggestions) ? parsed.suggestions : [];
+    return {
+      suggestions: normalizeSuggestionArray(suggestions),
+      monitorabilityScore: normalizeMonitorabilityScore(parsed.monitorabilityScore),
+    };
+  }
+
+  return {
+    suggestions: [],
+    monitorabilityScore: 1,
+  };
+}
+
+async function parseSuggestionsFromModelResponse(text, session) {
+  try {
+    return extractSuggestionsFromModelJson(parseJsonCandidates(text));
+  } catch (firstError) {
+    const repairPrompt = [
+      "Convert this output to strict RFC8259 JSON.",
+      "Return JSON only.",
+      "Do not use markdown fences.",
+      "Schema: {\"monitorabilityScore\": number, \"suggestions\":[\"...\"]}",
+      `Output:\n${String(text ?? "")}`,
+    ].join("\n");
+
+    const repairedText = await session.prompt(repairPrompt);
+    return extractSuggestionsFromModelJson(parseJsonCandidates(repairedText));
+  }
+}
+
+async function createMonitorSuggestionsSession() {
+  if (!("LanguageModel" in globalThis)) {
+    throw new Error("Prompt API is unavailable in this Chrome build.");
+  }
+
+  const availability = await LanguageModel.availability(MONITOR_SUGGESTIONS_MODEL_OPTIONS);
+  if (availability === "unavailable") {
+    throw new Error("Chrome local model is unavailable on this device/profile.");
+  }
+
+  return LanguageModel.create({
+    ...MONITOR_SUGGESTIONS_MODEL_OPTIONS,
+    initialPrompts: [
+      {
+        role: "system",
+        content:
+          "You identify concrete webpage changes that are useful to monitor. You return concise JSON only.",
+      },
+    ],
+  });
+}
+
+function buildMonitorSuggestionsPrompt(pageContext) {
+  return [
+    "Suggest monitoring conditions for this webpage.",
+    "Return JSON only using this schema: {\"monitorabilityScore\": number, \"suggestions\":[\"...\"]}",
+    "Rules:",
+    "- monitorabilityScore must be an integer from 1 to 10.",
+    "- 1 means poor monitorability (static legal pages or pages changing too broadly/noisily).",
+    "- 10 means highly monitorable with specific valuable changes (for example a product page with price/stock).",
+    "- Each suggestion must be a short phrase that can complete: notify me when <suggestion>.",
+    "- Do not include the words 'notify me when'.",
+    "- Focus on meaningful changes over time.",
+    "- Avoid vague statements like 'something changes'.",
+    "- If the page looks like a product page, consider stock/price/discount ideas.",
+    "- If no useful change is monitorable, return an empty array.",
+    `Maximum suggestions: ${MONITOR_SUGGESTIONS_MAX_COUNT}.`,
+    `Page title: ${pageContext.title}`,
+    `Page URL: ${pageContext.url}`,
+    `Page excerpt:\n${pageContext.text}`,
+  ].join("\n\n");
+}
+
+async function extractPageMonitorContext(tabId) {
+  const executed = await chrome.scripting.executeScript({
+    target: { tabId },
+    args: [MONITOR_SUGGESTIONS_MAX_TEXT_CHARS],
+    func: (maxTextChars) => {
+      function cleanText(value) {
+        return String(value ?? "")
+          .replace(/\u00a0/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+      }
+
+      const title = cleanText(document.title).slice(0, 240);
+      const description = cleanText(document.querySelector('meta[name="description"]')?.content || "").slice(0, 500);
+      const headings = Array.from(document.querySelectorAll("h1, h2, h3"))
+        .map((heading) => cleanText(heading.textContent))
+        .filter(Boolean)
+        .slice(0, 20)
+        .join(" | ");
+
+      const signalSelector = [
+        "[class*='stock']",
+        "[id*='stock']",
+        "[class*='price']",
+        "[id*='price']",
+        "[class*='status']",
+        "[id*='status']",
+        "[class*='availability']",
+        "[id*='availability']",
+      ].join(",");
+      const signalText = Array.from(document.querySelectorAll(signalSelector))
+        .map((element) => cleanText(element.textContent))
+        .filter(Boolean)
+        .slice(0, 30)
+        .join(" | ");
+
+      const bodyText = cleanText(document.body?.innerText ?? "").slice(0, maxTextChars);
+      const mergedText = [description, headings, signalText, bodyText]
+        .filter(Boolean)
+        .join("\n")
+        .slice(0, maxTextChars);
+
+      return {
+        url: location.href,
+        title,
+        text: mergedText,
+      };
+    },
+  });
+
+  return executed?.[0]?.result ?? null;
+}
+
+async function loadActionIconBitmaps() {
+  if (actionIconBitmapsPromise) {
+    return actionIconBitmapsPromise;
+  }
+
+  if (!("OffscreenCanvas" in globalThis) || typeof createImageBitmap !== "function") {
+    return null;
+  }
+
+  actionIconBitmapsPromise = (async () => {
+    const entries = await Promise.all(
+      ACTION_ICON_SIZES.map(async (size) => {
+        const response = await fetch(chrome.runtime.getURL(ACTION_ICON_PATHS[size]));
+        if (!response.ok) {
+          throw new Error(`Failed to load action icon ${size}px.`);
+        }
+
+        const bitmap = await createImageBitmap(await response.blob());
+        return [size, bitmap];
+      })
+    );
+
+    return new Map(entries);
+  })();
+
+  return actionIconBitmapsPromise;
+}
+
+function buildAnimatedIconImageData(bitmaps, angle) {
+  const imageData = {};
+
+  for (const size of ACTION_ICON_SIZES) {
+    const bitmap = bitmaps.get(size);
+    if (!bitmap) {
+      continue;
+    }
+
+    const canvas = new OffscreenCanvas(size, size);
+    const context = canvas.getContext("2d");
+    if (!context) {
+      continue;
+    }
+
+    context.clearRect(0, 0, size, size);
+    context.drawImage(bitmap, 0, 0, size, size);
+
+    const center = size / 2;
+    const orbitRadius = size * 0.42;
+    const starX = center + Math.cos(angle) * orbitRadius;
+    const starY = center + Math.sin(angle) * orbitRadius;
+
+    // Tangent gives the motion direction; tail is drawn in the opposite direction.
+    const tangentX = -Math.sin(angle);
+    const tangentY = Math.cos(angle);
+    const traceLength = size * 0.28;
+    const tailX = starX - tangentX * traceLength;
+    const tailY = starY - tangentY * traceLength;
+
+    const traceGradient = context.createLinearGradient(starX, starY, tailX, tailY);
+    traceGradient.addColorStop(0, "rgba(255, 245, 204, 0.92)");
+    traceGradient.addColorStop(1, "rgba(255, 245, 204, 0.0)");
+
+    context.lineCap = "round";
+    context.lineWidth = Math.max(1.2, size * 0.12);
+    context.strokeStyle = traceGradient;
+    context.beginPath();
+    context.moveTo(starX, starY);
+    context.lineTo(tailX, tailY);
+    context.stroke();
+
+    const glowRadius = Math.max(1.8, size * 0.22);
+    const glow = context.createRadialGradient(starX, starY, 0, starX, starY, glowRadius);
+    glow.addColorStop(0, "rgba(255, 255, 232, 0.95)");
+    glow.addColorStop(1, "rgba(255, 255, 232, 0.0)");
+    context.fillStyle = glow;
+    context.beginPath();
+    context.arc(starX, starY, glowRadius, 0, Math.PI * 2);
+    context.fill();
+
+    context.fillStyle = "rgba(255, 255, 245, 0.98)";
+    context.beginPath();
+    context.arc(starX, starY, Math.max(1.2, size * 0.09), 0, Math.PI * 2);
+    context.fill();
+
+    imageData[size] = context.getImageData(0, 0, size, size);
+  }
+
+  return imageData;
+}
+
+function startActionIconAnimation(tabId) {
+  if (!Number.isInteger(tabId) || tabId <= 0 || !chrome.action?.setIcon) {
+    console.info("[monitor-suggestions] icon-animation-skipped", {
+      tabId,
+      reason: "invalid-tab-or-action-api-missing",
+    });
+    return;
+  }
+
+  if (iconAnimationState.has(tabId)) {
+    return;
+  }
+
+  const token = Date.now() + Math.random();
+  iconAnimationState.set(tabId, token);
+  console.info("[monitor-suggestions] icon-animation-start", {
+    tabId,
+    token,
+  });
+
+  void (async () => {
+    try {
+      const bitmaps = await loadActionIconBitmaps();
+      if (!bitmaps) {
+        console.info("[monitor-suggestions] icon-animation-skipped", {
+          tabId,
+          reason: "offscreen-canvas-or-create-image-bitmap-unavailable",
+        });
+        iconAnimationState.delete(tabId);
+        return;
+      }
+
+      let frame = 0;
+      while (iconAnimationState.get(tabId) === token) {
+        const angle = -frame * 0.22;
+        await chrome.action.setIcon({
+          tabId,
+          imageData: buildAnimatedIconImageData(bitmaps, angle),
+        });
+        frame += 1;
+        await sleep(70);
+      }
+    } catch (error) {
+      console.warn("Failed to animate action icon.", error);
+    } finally {
+      if (iconAnimationState.get(tabId) === token) {
+        iconAnimationState.delete(tabId);
+      }
+      await resetActionIcon(tabId);
+      console.info("[monitor-suggestions] icon-animation-finished", {
+        tabId,
+        token,
+      });
+    }
+  })();
+}
+
+function syncActionIconAnimationForTab(tab) {
+  const tabId = Number(tab?.id);
+  if (!Number.isInteger(tabId) || tabId <= 0) {
+    return;
+  }
+
+  const shouldAnimate = Boolean(tab?.active) && tabsWithSuggestionSignal.has(tabId);
+  if (shouldAnimate) {
+    startActionIconAnimation(tabId);
+  } else {
+    stopActionIconAnimation(tabId, {
+      reset: true,
+      reason: tab?.active ? "no-suggestions-signal" : "tab-inactive",
+    });
+  }
+}
+
+async function getMonitorSuggestionsForTab(tab, { forceRefresh = false } = {}) {
+  if (!tab?.id || !isSupportedTabUrl(tab.url)) {
+    if (tab?.id) {
+      setTabSuggestionSignal(Number(tab.id), false);
+      syncActionIconAnimationForTab(tab);
+    }
+    console.info("[monitor-suggestions] skipped unsupported tab", {
+      tabId: tab?.id ?? null,
+      tabUrl: tab?.url ?? null,
+    });
+    return {
+      ok: true,
+      supportedPage: false,
+      suggestions: [],
+      monitorabilityScore: 1,
+      source: "unsupported",
+    };
+  }
+
+  const tabId = Number(tab.id);
+  const now = Date.now();
+  const cached = monitorSuggestionsCache.get(tabId);
+  console.info("[monitor-suggestions] request", {
+    tabId,
+    tabUrl: tab.url,
+    forceRefresh,
+    hasCache: Boolean(cached),
+  });
+
+  if (!forceRefresh && cached?.url === tab.url && now - cached.generatedAt < MONITOR_SUGGESTIONS_CACHE_TTL_MS) {
+    const cachedSuggestions = Array.isArray(cached.suggestions) ? cached.suggestions : [];
+    const monitorabilityScore = normalizeMonitorabilityScore(cached.monitorabilityScore);
+    console.info("[monitor-suggestions] cache-hit", {
+      tabId,
+      tabUrl: tab.url,
+      suggestionsCount: cachedSuggestions.length,
+      monitorabilityScore,
+    });
+    setTabSuggestionSignal(
+      tabId,
+      shouldAnimateForSuggestions({
+        suggestions: cachedSuggestions,
+        monitorabilityScore,
+      })
+    );
+    syncActionIconAnimationForTab(tab);
+    return {
+      ok: true,
+      supportedPage: true,
+      suggestions: cachedSuggestions,
+      monitorabilityScore,
+      source: "cache",
+    };
+  }
+
+  const pending = monitorSuggestionsPending.get(tabId);
+  if (!forceRefresh && pending?.url === tab.url) {
+    console.info("[monitor-suggestions] pending-request-reused", {
+      tabId,
+      tabUrl: tab.url,
+    });
+    return pending.promise;
+  }
+
+  const promise = (async () => {
+    console.info("[monitor-suggestions] extracting-page-context", {
+      tabId,
+      tabUrl: tab.url,
+    });
+    const context = await extractPageMonitorContext(tabId);
+    const pageContext = {
+      url: context?.url || tab.url,
+      title: context?.title || tab.title || "",
+      text: context?.text || "",
+    };
+
+    console.info("[monitor-suggestions] page-context-ready", {
+      tabId,
+      pageUrl: pageContext.url,
+      titleLength: pageContext.title.length,
+      textLength: pageContext.text.length,
+    });
+
+    if (!pageContext.text) {
+      const emptyResult = {
+        ok: true,
+        supportedPage: true,
+        suggestions: [],
+        monitorabilityScore: 1,
+        source: "empty",
+      };
+      monitorSuggestionsCache.set(tabId, {
+        url: tab.url,
+        suggestions: [],
+        monitorabilityScore: 1,
+        generatedAt: now,
+      });
+      setTabSuggestionSignal(tabId, false);
+      syncActionIconAnimationForTab(tab);
+      console.info("[monitor-suggestions] no-page-text", {
+        tabId,
+        tabUrl: tab.url,
+      });
+      return emptyResult;
+    }
+
+    const session = await createMonitorSuggestionsSession();
+    try {
+      console.info("[monitor-suggestions] prompting-llm", {
+        tabId,
+        tabUrl: tab.url,
+      });
+      const modelText = await session.prompt(buildMonitorSuggestionsPrompt(pageContext));
+      const { suggestions, monitorabilityScore } = await parseSuggestionsFromModelResponse(modelText, session);
+      monitorSuggestionsCache.set(tabId, {
+        url: tab.url,
+        suggestions,
+        monitorabilityScore,
+        generatedAt: Date.now(),
+      });
+      console.info("[monitor-suggestions] llm-success", {
+        tabId,
+        tabUrl: tab.url,
+        suggestionsCount: suggestions.length,
+        monitorabilityScore,
+      });
+      const fingerprint = suggestions.length > 0
+        ? `${tab.url}::${suggestions.join("|").toLowerCase()}`
+        : "";
+      const previousFingerprint = lastSuggestionAnimationFingerprint.get(tabId);
+      if (fingerprint && previousFingerprint !== fingerprint) {
+        lastSuggestionAnimationFingerprint.set(tabId, fingerprint);
+      }
+      if (!fingerprint) {
+        lastSuggestionAnimationFingerprint.delete(tabId);
+      }
+
+      setTabSuggestionSignal(
+        tabId,
+        shouldAnimateForSuggestions({
+          suggestions,
+          monitorabilityScore,
+        })
+      );
+      syncActionIconAnimationForTab(tab);
+
+      return {
+        ok: true,
+        supportedPage: true,
+        suggestions,
+        monitorabilityScore,
+        source: "llm",
+      };
+    } finally {
+      if (typeof session.destroy === "function") {
+        try {
+          session.destroy();
+        } catch (_error) {
+          // no-op
+        }
+      }
+    }
+  })()
+    .catch((error) => {
+      const message = formatError(error);
+      const permissionLikeError =
+        message.includes("Cannot access contents of the page") ||
+        message.includes("Missing host permission") ||
+        message.includes("Cannot access a chrome:// URL");
+      const errorCode = permissionLikeError ? "missing-host-permission" : "monitor-suggestions-failed";
+
+      console.warn("[monitor-suggestions] failed", {
+        tabId,
+        tabUrl: tab.url,
+        errorCode,
+        message,
+      });
+      setTabSuggestionSignal(tabId, false);
+      syncActionIconAnimationForTab(tab);
+
+      return {
+        ok: false,
+        supportedPage: true,
+        suggestions: [],
+        monitorabilityScore: 1,
+        errorCode,
+        error: permissionLikeError
+          ? "This page cannot be scanned yet. Grant site access to generate suggestions."
+          : message,
+      };
+    })
+    .finally(() => {
+      const current = monitorSuggestionsPending.get(tabId);
+      if (current?.promise === promise) {
+        monitorSuggestionsPending.delete(tabId);
+      }
+      console.info("[monitor-suggestions] request-finished", {
+        tabId,
+        tabUrl: tab.url,
+      });
+    });
+
+  monitorSuggestionsPending.set(tabId, {
+    url: tab.url,
+    promise,
+  });
+
+  return promise;
+}
+
+async function getMonitorSuggestionsForActiveTab(payload = {}) {
+  const tab = await getActiveTab();
+  const enabled = await getMonitorSuggestionsEnabled();
+  if (!enabled) {
+    if (tab?.id) {
+      setTabSuggestionSignal(Number(tab.id), false);
+      syncActionIconAnimationForTab(tab);
+    }
+    return {
+      ok: true,
+      supportedPage: Boolean(tab?.url && isSupportedTabUrl(tab.url)),
+      disabled: true,
+      suggestions: [],
+      monitorabilityScore: 1,
+      source: "disabled",
+    };
+  }
+
+  return getMonitorSuggestionsForTab(tab, {
+    forceRefresh: Boolean(payload.forceRefresh),
+  });
 }
 
 function permissionPatternForUrl(url) {
@@ -421,6 +1224,7 @@ async function buildPopupState() {
   const tab = await getActiveTab();
   const loginUrl = buildLoginUrl(config);
   const session = await checkVisualpingSession(config);
+  const monitorSuggestionsEnabled = await getMonitorSuggestionsEnabled();
   const workspaceRecords = (session.user?.workspaces ?? [])
     .map((workspace) => {
       const id = Number(workspace.id);
@@ -445,6 +1249,7 @@ async function buildPopupState() {
       sessionError: session.error ?? null,
       workspaces: workspaceRecords,
       preferredWorkspaceId,
+      monitorSuggestionsEnabled,
     };
   }
 
@@ -467,6 +1272,7 @@ async function buildPopupState() {
     sessionError: session.error ?? null,
     workspaces: workspaceRecords,
     preferredWorkspaceId,
+    monitorSuggestionsEnabled,
   };
 }
 
@@ -940,7 +1746,45 @@ chrome.cookies.onChanged.addListener(async ({ cookie }) => {
   }
 });
 
+chrome.tabs.onActivated.addListener(({ tabId }) => {
+  stopActionIconAnimationsExcept(tabId, "different-tab-activated");
+  chrome.tabs.get(tabId).then((tab) => {
+    syncActionIconAnimationForTab(tab);
+  }).catch(() => {
+    // no-op
+  });
+  queueMonitorSuggestionsForTab(tabId, "tab-activated", 350);
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (!tab?.active) {
+    return;
+  }
+
+  if (changeInfo.status === "loading") {
+    clearMonitorSuggestionsTrigger(tabId);
+    setTabSuggestionSignal(tabId, false);
+    syncActionIconAnimationForTab(tab);
+    return;
+  }
+
+  if (changeInfo.status === "complete") {
+    syncActionIconAnimationForTab(tab);
+    queueMonitorSuggestionsForTab(tabId, "tab-load-complete", MONITOR_SUGGESTIONS_TRIGGER_DELAY_MS);
+  }
+});
+
 chrome.tabs.onRemoved.addListener(async (tabId) => {
+  clearMonitorSuggestionsTrigger(tabId);
+  tabsWithSuggestionSignal.delete(tabId);
+  stopActionIconAnimation(tabId, {
+    reset: true,
+    reason: "tab-removed",
+  });
+  monitorSuggestionsCache.delete(tabId);
+  monitorSuggestionsPending.delete(tabId);
+  lastSuggestionAnimationFingerprint.delete(tabId);
+
   try {
     await chrome.storage.session.remove(scriptGeneratorContextKey(tabId));
 
@@ -957,6 +1801,47 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   (async () => {
     if (message?.type === "popup-state") {
       sendResponse(await buildPopupState());
+      return;
+    }
+
+    if (message?.type === "set-monitor-suggestions-enabled") {
+      try {
+        const enabled = message?.payload?.enabled === true;
+        await setMonitorSuggestionsEnabled(enabled);
+        if (enabled) {
+          const activeTab = await getActiveTab();
+          if (activeTab?.id) {
+            queueMonitorSuggestionsForTab(activeTab.id, "settings-enabled", 100);
+          }
+        } else {
+          for (const tabId of monitorSuggestionsTriggerTimers.keys()) {
+            clearMonitorSuggestionsTrigger(tabId);
+          }
+          tabsWithSuggestionSignal.clear();
+          stopAllActionIconAnimations("settings-disabled");
+        }
+        sendResponse({
+          ok: true,
+          enabled,
+        });
+      } catch (error) {
+        sendResponse({
+          ok: false,
+          error: formatError(error),
+        });
+      }
+      return;
+    }
+
+    if (message?.type === "monitor-suggestions") {
+      try {
+        sendResponse(await getMonitorSuggestionsForActiveTab(message.payload ?? {}));
+      } catch (error) {
+        sendResponse({
+          ok: false,
+          error: formatError(error),
+        });
+      }
       return;
     }
 

@@ -3,6 +3,7 @@ const uiState = {
   popupState: null,
   createFlash: null,
   jobsFlash: null,
+  settingsFlash: null,
   jobs: {
     pageIndex: 0,
     pageSize: 10,
@@ -16,10 +17,33 @@ const uiState = {
     openingScriptJobId: null,
   },
   createWorkspaceId: "",
+  settings: {
+    monitorSuggestionsEnabled: false,
+    savingMonitorSuggestionsEnabled: false,
+  },
+  suggestions: {
+    isLoading: false,
+    hasLoaded: false,
+    forUrl: "",
+    items: [],
+    error: "",
+    errorCode: "",
+  },
 };
 
 let jobsRequestId = 0;
 let jobsSearchTimer;
+
+function resetMonitorSuggestions() {
+  uiState.suggestions = {
+    isLoading: false,
+    hasLoaded: false,
+    forUrl: "",
+    items: [],
+    error: "",
+    errorCode: "",
+  };
+}
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (character) => {
@@ -91,6 +115,58 @@ function renderLoggedOut(state, contextLabel) {
   `;
 }
 
+function renderMonitorSuggestions() {
+  if (!uiState.settings.monitorSuggestionsEnabled) {
+    return `
+      <section class="suggestions-card">
+        <p class="section-label">Suggested Alerts</p>
+        <p class="muted suggestions-card__status">Enable "Suggest monitoring on pages" in Settings to generate suggestions.</p>
+      </section>
+    `;
+  }
+
+  const { isLoading, hasLoaded, items, error } = uiState.suggestions;
+  const suggestionButtons = items
+    .map((suggestion) => {
+      return `
+        <button
+          class="suggestion-pill"
+          type="button"
+          data-monitor-suggestion="${escapeHtml(suggestion)}"
+        >
+          ${escapeHtml(suggestion)}
+        </button>
+      `;
+    })
+    .join("");
+
+  const emptyMessage = hasLoaded && !isLoading && !error && !items.length
+    ? `<p class="muted suggestions-card__status">No obvious monitor triggers found on this page.</p>`
+    : "";
+  const loadingMessage = isLoading
+    ? `<p class="muted suggestions-card__status">Scanning this page for monitoring ideas...</p>`
+    : "";
+  const errorMessage = error
+    ? `<p class="muted suggestions-card__status suggestions-card__status--error">${escapeHtml(error)}</p>`
+    : "";
+
+  return `
+    <section class="suggestions-card">
+      <div class="suggestions-card__header">
+        <p class="section-label">Suggested Alerts</p>
+        <button id="refresh-suggestions" class="button-ghost suggestions-card__refresh" type="button" ${isLoading ? "disabled" : ""}>
+          ${isLoading ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+      <p class="muted suggestions-card__hint">Select one to fill "Alert me when".</p>
+      ${loadingMessage}
+      ${errorMessage}
+      ${suggestionButtons ? `<div class="suggestion-pill-list">${suggestionButtons}</div>` : ""}
+      ${emptyMessage}
+    </section>
+  `;
+}
+
 function renderCreateTab() {
   const state = uiState.popupState;
   if (!state) {
@@ -142,6 +218,8 @@ function renderCreateTab() {
         Alert me when
         <textarea id="alert-condition" name="alertCondition" placeholder="Price drops below $500, stock is back, a new job posting appears…" required></textarea>
       </label>
+
+      ${renderMonitorSuggestions()}
 
       ${workspaceSelect}
 
@@ -303,6 +381,31 @@ function renderJobsTab() {
   `;
 }
 
+function renderSettingsTab() {
+  if (!uiState.popupState) {
+    return `<p class="status">Loading…</p>`;
+  }
+
+  const disabled = uiState.settings.savingMonitorSuggestionsEnabled ? "disabled" : "";
+
+  return `
+    <section class="filter-card settings-card">
+      <p class="filter-card__label">Settings</p>
+      <label class="settings-toggle">
+        <input
+          id="monitor-suggestions-enabled"
+          type="checkbox"
+          ${uiState.settings.monitorSuggestionsEnabled ? "checked" : ""}
+          ${disabled}
+        />
+        <span>Suggest monitoring on pages</span>
+      </label>
+      <p class="muted settings-card__hint">When enabled, the extension requests all-sites access and suggests useful "notify me when..." conditions based on page text.</p>
+    </section>
+    ${renderMessage(uiState.settingsFlash)}
+  `;
+}
+
 function renderApp() {
   const app = document.querySelector("#app");
   if (!app) {
@@ -312,12 +415,15 @@ function renderApp() {
   const focusedId = document.activeElement?.id ?? null;
 
   const createActive = uiState.activeTab === "create";
+  const jobsActive = uiState.activeTab === "jobs";
+  const settingsActive = uiState.activeTab === "settings";
   app.innerHTML = `
     <div class="tabs">
       <button class="tab-button ${createActive ? "is-active" : ""}" data-tab="create" type="button">Create</button>
-      <button class="tab-button ${!createActive ? "is-active" : ""}" data-tab="jobs" type="button">Jobs</button>
+      <button class="tab-button ${jobsActive ? "is-active" : ""}" data-tab="jobs" type="button">Jobs</button>
+      <button class="tab-button ${settingsActive ? "is-active" : ""}" data-tab="settings" type="button">Settings</button>
     </div>
-    ${createActive ? renderCreateTab() : renderJobsTab()}
+    ${createActive ? renderCreateTab() : jobsActive ? renderJobsTab() : renderSettingsTab()}
   `;
 
   bindEvents();
@@ -343,12 +449,94 @@ async function ensureTabPermission(url) {
   }
 }
 
+function applyMonitorSuggestion(value) {
+  const suggestion = String(value ?? "").trim();
+  if (!suggestion) {
+    return;
+  }
+
+  const textarea = document.querySelector("#alert-condition");
+  if (!textarea) {
+    return;
+  }
+
+  textarea.value = suggestion;
+  textarea.focus();
+  textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+}
+
+async function loadMonitorSuggestions({ forceRefresh = false } = {}) {
+  if (!uiState.settings.monitorSuggestionsEnabled) {
+    resetMonitorSuggestions();
+    renderApp();
+    return;
+  }
+
+  const state = uiState.popupState;
+  const tabUrl = state?.tab?.url ?? "";
+  if (!state?.loggedIn || !state?.supportedPage || !tabUrl) {
+    resetMonitorSuggestions();
+    renderApp();
+    return;
+  }
+
+  if (!forceRefresh && uiState.suggestions.hasLoaded && uiState.suggestions.forUrl === tabUrl) {
+    return;
+  }
+
+  uiState.suggestions.isLoading = true;
+  uiState.suggestions.error = "";
+  uiState.suggestions.errorCode = "";
+  uiState.suggestions.forUrl = tabUrl;
+  renderApp();
+
+  const response = await chrome.runtime.sendMessage({
+    type: "monitor-suggestions",
+    payload: {
+      forceRefresh,
+    },
+  });
+
+  if (uiState.popupState?.tab?.url !== tabUrl) {
+    return;
+  }
+
+  uiState.suggestions.isLoading = false;
+  uiState.suggestions.hasLoaded = true;
+
+  if (!response?.ok) {
+    uiState.suggestions.items = [];
+    uiState.suggestions.error = response?.error ?? "Could not generate monitoring suggestions.";
+    uiState.suggestions.errorCode = String(response?.errorCode ?? "");
+    renderApp();
+    return;
+  }
+
+  uiState.suggestions.items = Array.isArray(response.suggestions)
+    ? response.suggestions.map((value) => String(value ?? "").trim()).filter(Boolean)
+    : [];
+  uiState.suggestions.error = "";
+  uiState.suggestions.errorCode = "";
+  renderApp();
+}
+
 async function refreshPopupState() {
+  const previousTabUrl = uiState.popupState?.tab?.url ?? "";
   const state = await chrome.runtime.sendMessage({ type: "popup-state" });
   uiState.popupState = state;
+  uiState.settings.monitorSuggestionsEnabled = Boolean(state?.monitorSuggestionsEnabled);
+  const nextTabUrl = state?.tab?.url ?? "";
 
   if (!state?.supportedPage && state?.loggedIn && uiState.activeTab === "create") {
     uiState.activeTab = "jobs";
+  }
+
+  if (previousTabUrl !== nextTabUrl) {
+    resetMonitorSuggestions();
+  }
+
+  if (!uiState.settings.monitorSuggestionsEnabled) {
+    resetMonitorSuggestions();
   }
 
   const availableWorkspaces = (state?.workspaces ?? []).map((workspace) => workspace.id);
@@ -478,9 +666,83 @@ async function handleOpenLogin() {
   window.close();
 }
 
+async function handleMonitorSuggestionsToggle(enabled) {
+  uiState.settings.savingMonitorSuggestionsEnabled = true;
+  uiState.settingsFlash = null;
+  renderApp();
+
+  try {
+    if (enabled) {
+      const granted = await chrome.permissions.request({
+        origins: ["http://*/*", "https://*/*"],
+      });
+      if (!granted) {
+        uiState.settings.monitorSuggestionsEnabled = false;
+        uiState.settingsFlash = {
+          type: "error",
+          text: "All-sites access is required to suggest monitoring ideas.",
+        };
+        uiState.settings.savingMonitorSuggestionsEnabled = false;
+        renderApp();
+        return;
+      }
+    }
+
+    const response = await chrome.runtime.sendMessage({
+      type: "set-monitor-suggestions-enabled",
+      payload: {
+        enabled,
+      },
+    });
+
+    if (!response?.ok) {
+      uiState.settingsFlash = {
+        type: "error",
+        text: response?.error ?? "Could not save this setting.",
+      };
+      await refreshPopupState();
+      uiState.settings.savingMonitorSuggestionsEnabled = false;
+      renderApp();
+      return;
+    }
+
+    uiState.settings.monitorSuggestionsEnabled = response.enabled === true;
+    uiState.settingsFlash = {
+      type: "success",
+      text: uiState.settings.monitorSuggestionsEnabled
+        ? "Monitoring suggestions are enabled."
+        : "Monitoring suggestions are disabled.",
+    };
+
+    if (uiState.settings.monitorSuggestionsEnabled && uiState.activeTab === "create") {
+      await loadMonitorSuggestions({ forceRefresh: true });
+    } else if (!uiState.settings.monitorSuggestionsEnabled) {
+      resetMonitorSuggestions();
+    }
+  } catch (error) {
+    uiState.settingsFlash = {
+      type: "error",
+      text: error instanceof Error ? error.message : String(error),
+    };
+    await refreshPopupState();
+  } finally {
+    uiState.settings.savingMonitorSuggestionsEnabled = false;
+    renderApp();
+  }
+}
+
 async function handleTabChange(nextTab) {
   uiState.activeTab = nextTab;
   renderApp();
+
+  if (
+    nextTab === "create" &&
+    uiState.popupState?.loggedIn &&
+    uiState.popupState?.supportedPage &&
+    uiState.settings.monitorSuggestionsEnabled
+  ) {
+    await loadMonitorSuggestions();
+  }
 
   if (nextTab === "jobs" && uiState.popupState?.loggedIn && !uiState.jobs.data && !uiState.jobs.isLoading) {
     await loadJobsPage();
@@ -637,6 +899,20 @@ function bindEvents() {
     uiState.createWorkspaceId = event.target.value;
   });
 
+  document.querySelector("#monitor-suggestions-enabled")?.addEventListener("change", (event) => {
+    void handleMonitorSuggestionsToggle(event.target.checked);
+  });
+
+  document.querySelector("#refresh-suggestions")?.addEventListener("click", () => {
+    void loadMonitorSuggestions({ forceRefresh: true });
+  });
+
+  document.querySelectorAll("[data-monitor-suggestion]").forEach((button) => {
+    button.addEventListener("click", () => {
+      applyMonitorSuggestion(button.dataset.monitorSuggestion);
+    });
+  });
+
   document.querySelector("#jobs-name-filter")?.addEventListener("input", (event) => {
     scheduleJobsSearch(event.target.value);
   });
@@ -683,6 +959,14 @@ function bindEvents() {
 async function bootstrap() {
   await refreshPopupState();
   renderApp();
+
+  if (
+    uiState.popupState?.loggedIn &&
+    uiState.popupState?.supportedPage &&
+    uiState.settings.monitorSuggestionsEnabled
+  ) {
+    void loadMonitorSuggestions();
+  }
 
   if (uiState.popupState?.loggedIn) {
     await loadJobsPage();

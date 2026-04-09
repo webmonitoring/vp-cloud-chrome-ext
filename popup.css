@@ -52,8 +52,6 @@ body {
 
 .panel__body {
   padding: 16px 18px 18px;
-  max-height: 640px;
-  overflow-y: auto;
 }
 
 .eyebrow {
@@ -86,7 +84,7 @@ h1 {
 
 .tabs {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   gap: 8px;
   margin-bottom: 14px;
 }
@@ -116,6 +114,7 @@ h1 {
 .page-card,
 .jobs-card,
 .filter-card,
+.suggestions-card,
 .job-item,
 .empty-state {
   padding: 12px 14px;
@@ -130,6 +129,8 @@ h1 {
 .jobs-card + .filter-card,
 .filter-card + .jobs-card,
 .jobs-card + .message,
+.suggestions-card + label,
+.suggestions-card + .message,
 form + .jobs-card,
 form + .message,
 .message + .jobs-card,
@@ -148,6 +149,84 @@ form + .message,
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+.suggestions-card {
+  display: grid;
+  gap: 8px;
+}
+
+.suggestions-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.suggestions-card__header .section-label {
+  margin: 0;
+}
+
+.suggestions-card__hint {
+  margin: 0;
+}
+
+.suggestions-card__refresh {
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+}
+
+.suggestions-card__status {
+  margin: 0;
+  font-size: 12px;
+}
+
+.suggestions-card__status--error {
+  color: var(--danger);
+}
+
+.suggestion-pill-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.suggestion-pill {
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.9);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 8px 11px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.25;
+  text-align: left;
+}
+
+.suggestion-pill:hover {
+  background: rgba(187, 77, 0, 0.11);
+}
+
+.settings-card {
+  display: grid;
+  gap: 10px;
+}
+
+.settings-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+}
+
+.settings-toggle input {
+  width: auto;
+  margin: 0;
+}
+
+.settings-card__hint {
+  margin: 0;
 }
 
 .page-card__title,
