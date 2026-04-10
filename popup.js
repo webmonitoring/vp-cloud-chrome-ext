@@ -1,5 +1,6 @@
 const uiState = {
   activeTab: "create",
+  lastMainTab: "create",
   popupState: null,
   createFlash: null,
   jobsFlash: null,
@@ -26,6 +27,7 @@ const uiState = {
     hasLoaded: false,
     forUrl: "",
     items: [],
+    selected: "",
     error: "",
     errorCode: "",
   },
@@ -40,6 +42,7 @@ function resetMonitorSuggestions() {
     hasLoaded: false,
     forUrl: "",
     items: [],
+    selected: "",
     error: "",
     errorCode: "",
   };
@@ -70,12 +73,11 @@ function formatTimestamp(value) {
 }
 
 function renderMessage(message) {
-  if (!message?.text) {
+  if (!message?.text || message.type !== "error") {
     return "";
   }
 
-  const typeClass = message.type === "error" ? "message--error" : "message--success";
-  return `<p class="message ${typeClass}">${escapeHtml(message.text)}</p>`;
+  return `<p class="message message--error">${escapeHtml(message.text)}</p>`;
 }
 
 function renderTrackedJobs(trackedJobs, frequencyOptions) {
@@ -118,8 +120,8 @@ function renderLoggedOut(state, contextLabel) {
 function renderMonitorSuggestions() {
   if (!uiState.settings.monitorSuggestionsEnabled) {
     return `
-      <section class="suggestions-card">
-        <p class="section-label">Suggested Alerts</p>
+      <section class="suggestions-card suggestions-card--flat">
+        <p class="suggestions-title"><span class="suggestions-title__spark">✦</span> Suggestions:</p>
         <p class="muted suggestions-card__status">Enable "Suggest monitoring on pages" in Settings to generate suggestions.</p>
       </section>
     `;
@@ -128,13 +130,14 @@ function renderMonitorSuggestions() {
   const { isLoading, hasLoaded, items, error } = uiState.suggestions;
   const suggestionButtons = items
     .map((suggestion) => {
+      const selectedClass = uiState.suggestions.selected === suggestion ? " is-selected" : "";
       return `
         <button
-          class="suggestion-pill"
+          class="suggestion-pill${selectedClass}"
           type="button"
           data-monitor-suggestion="${escapeHtml(suggestion)}"
         >
-          ${escapeHtml(suggestion)}
+          <span class="suggestion-pill__text">${escapeHtml(suggestion)}</span>
         </button>
       `;
     })
@@ -151,14 +154,10 @@ function renderMonitorSuggestions() {
     : "";
 
   return `
-    <section class="suggestions-card">
+    <section class="suggestions-card suggestions-card--flat">
       <div class="suggestions-card__header">
-        <p class="section-label">Suggested Alerts</p>
-        <button id="refresh-suggestions" class="button-ghost suggestions-card__refresh" type="button" ${isLoading ? "disabled" : ""}>
-          ${isLoading ? "Refreshing..." : "Refresh"}
-        </button>
+        <p class="suggestions-title"><span class="suggestions-title__spark">✦</span> Suggestions:</p>
       </div>
-      <p class="muted suggestions-card__hint">Select one to fill "Alert me when".</p>
       ${loadingMessage}
       ${errorMessage}
       ${suggestionButtons ? `<div class="suggestion-pill-list">${suggestionButtons}</div>` : ""}
@@ -186,53 +185,66 @@ function renderCreateTab() {
     `;
   }
 
-  const trackedJobsMarkup = renderTrackedJobs(state.trackedJobs, state.frequencyOptions);
   const frequencyOptions = state.frequencyOptions
     .map((option) => {
       const selected = option.value === "1440" ? "selected" : "";
       return `<option value="${escapeHtml(option.value)}" ${selected}>${escapeHtml(option.label)}</option>`;
     })
     .join("");
-  const workspaceOptions = (state.workspaces ?? [])
+  const workspaces = state.workspaces ?? [];
+  const workspaceOptions = workspaces
     .map((workspace) => {
       const selected = String(workspace.id) === String(uiState.createWorkspaceId) ? "selected" : "";
       return `<option value="${escapeHtml(String(workspace.id))}" ${selected}>${escapeHtml(workspace.name)}</option>`;
     })
     .join("");
-  const workspaceSelect = workspaceOptions
-    ? `<label>
-        Workspace
-        <select id="create-workspace">${workspaceOptions}</select>
-      </label>`
-    : `<p class="muted">Workspace lookup currently unavailable.</p>`;
+  const workspaceSelect = state.isBusinessUser
+    ? (workspaceOptions
+      ? `
+        <label class="form-row-select">
+          <span class="form-row-select__label"><span class="form-row-select__icon">🧰</span> Workspace:</span>
+          <select id="create-workspace">${workspaceOptions}</select>
+        </label>
+      `
+      : `
+        <label class="form-row-select form-row-select--disabled">
+          <span class="form-row-select__label"><span class="form-row-select__icon">🧰</span> Workspace:</span>
+          <select id="create-workspace" disabled><option>Unavailable</option></select>
+        </label>
+      `)
+    : "";
+  const userEmail = String(state.userEmail ?? "").trim();
+  const identityLabel = userEmail || "Signed in";
 
   return `
-    <section class="page-card">
-      <p class="page-card__label">Current Page</p>
-      <p class="page-card__title">${escapeHtml(state.tab.title)}</p>
-      <p class="page-card__url">${escapeHtml(state.tab.url)}</p>
-    </section>
-
-    <form id="create-job-form">
-      <label>
-        Alert me when
-        <textarea id="alert-condition" name="alertCondition" placeholder="Price drops below $500, stock is back, a new job posting appears…" required></textarea>
+    <form id="create-job-form" class="create-form">
+      <label class="create-form__label">
+        Alert me when:
+        <div class="important-definition-input">
+          <textarea id="alert-condition" name="alertCondition" placeholder="Enter a condition or pick from below" required></textarea>
+          <span class="important-definition-input__pulse" aria-hidden="true"></span>
+        </div>
       </label>
 
       ${renderMonitorSuggestions()}
 
-      ${workspaceSelect}
-
-      <label>
-        Frequency of checking
+      <label class="form-row-select">
+        <span class="form-row-select__label"><span class="form-row-select__icon">🕒</span> Check:</span>
         <select id="interval" name="interval">${frequencyOptions}</select>
       </label>
 
-      <button id="submit-button" class="button-primary" type="submit">Create Monitoring Job</button>
+      ${workspaceSelect}
+
+      <button id="submit-button" class="button-primary button-primary--main" type="submit">Start monitoring</button>
     </form>
 
     ${renderMessage(uiState.createFlash)}
-    ${trackedJobsMarkup}
+    <section class="create-footer">
+      <div class="create-footer__identity">
+        <span class="create-footer__avatar"></span>
+        <span class="create-footer__email">${escapeHtml(identityLabel)}</span>
+      </div>
+    </section>
   `;
 }
 
@@ -250,7 +262,7 @@ function renderJobBadges(job) {
   return `<div class="badge-list">${badges}</div>`;
 }
 
-function renderJobsList(jobs, frequencyOptions) {
+function renderJobsList(jobs) {
   if (!jobs.length) {
     return `
       <div class="empty-state">
@@ -262,49 +274,40 @@ function renderJobsList(jobs, frequencyOptions) {
 
   const items = jobs
     .map((job) => {
-      const intervalLabel = job.interval ? formatInterval(frequencyOptions, job.interval) : "Interval unavailable";
-      const toggleLabel = job.cookieSyncEnabled ? "Cookie Sync On" : "Cookie Sync Off";
       const toggleClass = job.cookieSyncEnabled ? "is-on" : "is-off";
-      const syncStatus = job.cookieSyncEnabled
-        ? `Cookie sync active · ${job.cookieCount ?? 0} cookies · ${formatTimestamp(job.lastSyncedAt)}`
-        : "Cookie sync is off in this extension";
-      const jobState = job.isActive === false ? "Paused" : "Active";
-      const meta = [intervalLabel, job.mode, jobState].filter(Boolean).join(" · ");
-      const error = job.lastError ? `<p class="job-item__error">${escapeHtml(job.lastError)}</p>` : "";
       const openingScript = uiState.jobs.openingScriptJobId === job.id;
       const scriptHint =
         "If the monitored job needs clicks or actions to end up in the state that you want it to be, use this to add actions";
+      const titleText = String(job.description || `Job #${job.id}`).trim();
+      const scriptTitle = `Add script action. ${scriptHint}`;
+      const cookieTitle = job.cookieSyncEnabled ? "Cookie sync on" : "Cookie sync off";
 
       return `
         <li class="job-item">
-          <div class="job-item__top">
-            <div class="job-item__content">
-              <p class="job-item__title">${escapeHtml(job.description || `Job #${job.id}`)}</p>
-              <p class="job-item__url">${escapeHtml(job.url)}</p>
-              <p class="job-item__meta">${escapeHtml(meta)}</p>
-              ${renderJobBadges(job)}
-              <p class="job-item__status">${escapeHtml(syncStatus)}</p>
-              ${error}
+          <div class="job-item__top job-item__top--compact">
+            <div class="job-item__content job-item__content--compact">
+              <p class="job-item__title job-item__title--compact" title="${escapeHtml(job.url)}">${escapeHtml(titleText)}</p>
             </div>
-            <div class="job-item__actions">
-              <div class="job-item__script-action">
-                <button
-                  class="button-ghost button-script-action"
-                  data-script-job-id="${escapeHtml(String(job.id))}"
-                  type="button"
-                  ${openingScript ? "disabled" : ""}
-                >
-                  ${escapeHtml(openingScript ? "Opening…" : "Add Script Action")}
-                </button>
-                <span class="info-hint" title="${escapeHtml(scriptHint)}" aria-label="${escapeHtml(scriptHint)}" tabindex="0">?</span>
-              </div>
+            <div class="job-item__actions job-item__actions--compact">
               <button
-                class="button-toggle ${toggleClass}"
+                class="job-icon-button job-icon-button--script"
+                data-script-job-id="${escapeHtml(String(job.id))}"
+                type="button"
+                title="${escapeHtml(scriptTitle)}"
+                aria-label="${escapeHtml(scriptTitle)}"
+                ${openingScript ? "disabled" : ""}
+              >
+                🔧
+              </button>
+              <button
+                class="job-icon-button job-icon-button--cookie ${toggleClass}"
                 data-job-id="${escapeHtml(String(job.id))}"
                 type="button"
+                title="${escapeHtml(cookieTitle)}"
+                aria-label="${escapeHtml(cookieTitle)}"
                 ${uiState.jobs.togglingJobId === job.id ? "disabled" : ""}
               >
-                ${escapeHtml(uiState.jobs.togglingJobId === job.id ? "Updating…" : toggleLabel)}
+                🍪
               </button>
             </div>
           </div>
@@ -369,7 +372,7 @@ function renderJobsTab() {
     ${renderMessage(uiState.jobsFlash)}
     ${uiState.jobs.error ? renderMessage({ type: 'error', text: uiState.jobs.error }) : ""}
     ${loadingMessage}
-    ${data ? renderJobsList(data.jobs ?? [], state.frequencyOptions) : ""}
+    ${data ? renderJobsList(data.jobs ?? []) : ""}
 
     <div class="jobs-footer">
       <div class="pagination">
@@ -417,13 +420,34 @@ function renderApp() {
   const createActive = uiState.activeTab === "create";
   const jobsActive = uiState.activeTab === "jobs";
   const settingsActive = uiState.activeTab === "settings";
+  const tabContentClass = createActive
+    ? "tab-content tab-content--create"
+    : jobsActive
+      ? "tab-content tab-content--jobs"
+      : "tab-content tab-content--settings";
   app.innerHTML = `
-    <div class="tabs">
-      <button class="tab-button ${createActive ? "is-active" : ""}" data-tab="create" type="button">Create</button>
-      <button class="tab-button ${jobsActive ? "is-active" : ""}" data-tab="jobs" type="button">Jobs</button>
-      <button class="tab-button ${settingsActive ? "is-active" : ""}" data-tab="settings" type="button">Settings</button>
+    <div class="topbar">
+      <div class="topbar__left">
+        <img class="topbar__logo" src="icons/logo.svg" alt="Visualping" />
+        <div class="tabs">
+          <button class="tab-button ${createActive ? "is-active" : ""}" data-tab="create" type="button">Create</button>
+          <button class="tab-button ${jobsActive ? "is-active" : ""}" data-tab="jobs" type="button">Jobs</button>
+        </div>
+      </div>
+      <button
+        id="settings-toggle"
+        class="settings-button ${settingsActive ? "is-active" : ""}"
+        type="button"
+        aria-label="Settings"
+        title="Settings"
+      >
+        ⚙
+      </button>
     </div>
-    ${createActive ? renderCreateTab() : jobsActive ? renderJobsTab() : renderSettingsTab()}
+    <div class="topbar-divider"></div>
+    <div class="${tabContentClass}">
+      ${createActive ? renderCreateTab() : jobsActive ? renderJobsTab() : renderSettingsTab()}
+    </div>
   `;
 
   bindEvents();
@@ -461,8 +485,10 @@ function applyMonitorSuggestion(value) {
   }
 
   textarea.value = suggestion;
+  uiState.suggestions.selected = suggestion;
   textarea.focus();
   textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+  renderApp();
 }
 
 async function loadMonitorSuggestions({ forceRefresh = false } = {}) {
@@ -515,6 +541,9 @@ async function loadMonitorSuggestions({ forceRefresh = false } = {}) {
   uiState.suggestions.items = Array.isArray(response.suggestions)
     ? response.suggestions.map((value) => String(value ?? "").trim()).filter(Boolean)
     : [];
+  if (!uiState.suggestions.items.includes(uiState.suggestions.selected)) {
+    uiState.suggestions.selected = "";
+  }
   uiState.suggestions.error = "";
   uiState.suggestions.errorCode = "";
   renderApp();
@@ -714,7 +743,11 @@ async function handleMonitorSuggestionsToggle(enabled) {
         : "Monitoring suggestions are disabled.",
     };
 
-    if (uiState.settings.monitorSuggestionsEnabled && uiState.activeTab === "create") {
+    const shouldLoadSuggestionsAfterEnable =
+      uiState.settings.monitorSuggestionsEnabled &&
+      (uiState.activeTab === "create" || uiState.lastMainTab === "create");
+
+    if (shouldLoadSuggestionsAfterEnable) {
       await loadMonitorSuggestions({ forceRefresh: true });
     } else if (!uiState.settings.monitorSuggestionsEnabled) {
       resetMonitorSuggestions();
@@ -732,7 +765,12 @@ async function handleMonitorSuggestionsToggle(enabled) {
 }
 
 async function handleTabChange(nextTab) {
+  if (nextTab !== "create" && nextTab !== "jobs") {
+    return;
+  }
+
   uiState.activeTab = nextTab;
+  uiState.lastMainTab = nextTab;
   renderApp();
 
   if (
@@ -747,6 +785,27 @@ async function handleTabChange(nextTab) {
   if (nextTab === "jobs" && uiState.popupState?.loggedIn && !uiState.jobs.data && !uiState.jobs.isLoading) {
     await loadJobsPage();
   }
+}
+
+function handleSettingsToggle() {
+  if (uiState.activeTab === "settings") {
+    uiState.activeTab = uiState.lastMainTab;
+    if (
+      uiState.activeTab === "create" &&
+      uiState.popupState?.loggedIn &&
+      !uiState.popupState?.supportedPage
+    ) {
+      uiState.activeTab = "jobs";
+      uiState.lastMainTab = "jobs";
+    }
+  } else {
+    if (uiState.activeTab === "create" || uiState.activeTab === "jobs") {
+      uiState.lastMainTab = uiState.activeTab;
+    }
+    uiState.activeTab = "settings";
+  }
+
+  renderApp();
 }
 
 async function handleToggleCookieSync(jobId) {
@@ -814,19 +873,6 @@ async function handleOpenScriptAction(jobId) {
   uiState.jobsFlash = null;
   renderApp();
 
-  let panelOpenedFromGesture = false;
-  let panelGestureError = "";
-  if (chrome.sidePanel?.open) {
-    try {
-      await chrome.sidePanel.open({
-        windowId: chrome.windows.WINDOW_ID_CURRENT,
-      });
-      panelOpenedFromGesture = true;
-    } catch (error) {
-      panelGestureError = error instanceof Error ? error.message : String(error);
-    }
-  }
-
   try {
     await ensureTabPermission(job.url);
   } catch (error) {
@@ -849,19 +895,16 @@ async function handleOpenScriptAction(jobId) {
       url: job.url,
       description: job.description,
       ...(Number.isInteger(targetWindowId) ? { windowId: targetWindowId } : {}),
-      openPanel: !panelOpenedFromGesture,
+      openPanel: true,
     },
   });
 
   uiState.jobs.openingScriptJobId = null;
 
   if (!response?.ok) {
-    const debugMessage = panelGestureError
-      ? ` Direct open failed: ${panelGestureError}`
-      : "";
     uiState.jobsFlash = {
       type: "error",
-      text: `${response?.error ?? "Could not open the script generator."}${debugMessage}`,
+      text: response?.error ?? "Could not open the script generator.",
     };
     renderApp();
     return;
@@ -887,6 +930,10 @@ function bindEvents() {
     });
   });
 
+  document.querySelector("#settings-toggle")?.addEventListener("click", () => {
+    handleSettingsToggle();
+  });
+
   document.querySelector("#open-login")?.addEventListener("click", () => {
     void handleOpenLogin();
   });
@@ -901,10 +948,6 @@ function bindEvents() {
 
   document.querySelector("#monitor-suggestions-enabled")?.addEventListener("change", (event) => {
     void handleMonitorSuggestionsToggle(event.target.checked);
-  });
-
-  document.querySelector("#refresh-suggestions")?.addEventListener("click", () => {
-    void loadMonitorSuggestions({ forceRefresh: true });
   });
 
   document.querySelectorAll("[data-monitor-suggestion]").forEach((button) => {
@@ -956,9 +999,25 @@ function bindEvents() {
   });
 }
 
+function focusAlertConditionField() {
+  if (uiState.activeTab !== "create") {
+    return;
+  }
+
+  const textarea = document.querySelector("#alert-condition");
+  if (!(textarea instanceof HTMLTextAreaElement) || textarea.disabled) {
+    return;
+  }
+
+  textarea.focus();
+  const cursorAtEnd = textarea.value.length;
+  textarea.setSelectionRange(cursorAtEnd, cursorAtEnd);
+}
+
 async function bootstrap() {
   await refreshPopupState();
   renderApp();
+  focusAlertConditionField();
 
   if (
     uiState.popupState?.loggedIn &&

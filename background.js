@@ -128,6 +128,50 @@ async function getLatestScriptGeneratorContext() {
     })[0] ?? null;
 }
 
+async function syncScriptGeneratorPanelForTab(tabId) {
+  if (!Number.isInteger(tabId) || tabId <= 0 || !chrome.sidePanel?.setOptions) {
+    return;
+  }
+
+  const context = await getScriptGeneratorContext(tabId);
+  try {
+    await chrome.sidePanel.setOptions({
+      enabled: false,
+    });
+  } catch (_error) {
+    // Best effort only.
+  }
+
+  if (!context) {
+    try {
+      await chrome.sidePanel.setOptions({
+        tabId,
+        enabled: false,
+      });
+    } catch (_error) {
+      // Best effort only.
+    }
+    return;
+  }
+
+  const panelPath = buildScriptGeneratorPanelPath(context);
+  await chrome.sidePanel.setOptions({
+    tabId,
+    enabled: true,
+    path: panelPath,
+  });
+
+  if (!chrome.sidePanel?.open) {
+    return;
+  }
+
+  try {
+    await chrome.sidePanel.open({ tabId });
+  } catch (_error) {
+    // Best effort only.
+  }
+}
+
 function toNumberOrNull(value) {
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
@@ -1076,6 +1120,19 @@ function getOrganisationId(session) {
   return Number.isInteger(numericOrganisationId) && numericOrganisationId > 0 ? numericOrganisationId : null;
 }
 
+function getUserEmail(session) {
+  const candidateValues = [
+    session.user?.email,
+    session.user?.emailAddress,
+    session.user?.profile?.email,
+    session.user?.attributes?.email,
+  ];
+
+  return candidateValues
+    .map((value) => String(value ?? "").trim())
+    .find((value) => value.includes("@")) ?? "";
+}
+
 function getPreferredWorkspaceId(session) {
   const workspaces = session.user?.workspaces ?? [];
   if (!workspaces.length) {
@@ -1297,6 +1354,8 @@ async function buildPopupState() {
   const loginUrl = buildLoginUrl(config);
   const session = await checkVisualpingSession(config);
   const monitorSuggestionsEnabled = await getMonitorSuggestionsEnabled();
+  const isBusinessUser = getOrganisationId(session) !== null;
+  const userEmail = getUserEmail(session);
   const workspaceRecords = (session.user?.workspaces ?? [])
     .map((workspace) => {
       const id = Number(workspace.id);
@@ -1322,6 +1381,8 @@ async function buildPopupState() {
       workspaces: workspaceRecords,
       preferredWorkspaceId,
       monitorSuggestionsEnabled,
+      isBusinessUser,
+      userEmail,
     };
   }
 
@@ -1345,6 +1406,8 @@ async function buildPopupState() {
     workspaces: workspaceRecords,
     preferredWorkspaceId,
     monitorSuggestionsEnabled,
+    isBusinessUser,
+    userEmail,
   };
 }
 
@@ -1548,32 +1611,6 @@ async function openScriptGeneratorForJob(payload = {}) {
   let panelOpened = false;
   let lastOpenError = null;
 
-  if (shouldOpenPanel && hasRequestedWindowId) {
-    try {
-      await chrome.windows.update(requestedWindowId, {
-        focused: true,
-      });
-    } catch (_error) {
-      // Non-fatal; keep trying to open panel.
-    }
-
-    try {
-      await chrome.sidePanel.open({
-        windowId: requestedWindowId,
-      });
-      panelOpened = true;
-      console.info("Script generator panel opened via requested window.", {
-        requestedWindowId,
-      });
-    } catch (error) {
-      lastOpenError = error;
-      console.warn("Failed to open script generator panel via requested window.", {
-        requestedWindowId,
-        error: formatError(error),
-      });
-    }
-  }
-
   let tab = null;
   if (hasRequestedTabId) {
     try {
@@ -1635,6 +1672,14 @@ async function openScriptGeneratorForJob(payload = {}) {
 
   await setScriptGeneratorContext(tab.id, context);
 
+  try {
+    await chrome.sidePanel.setOptions({
+      enabled: false,
+    });
+  } catch (_error) {
+    // Best effort only.
+  }
+
   await chrome.sidePanel.setOptions({
     tabId: tab.id,
     enabled: true,
@@ -1659,33 +1704,6 @@ async function openScriptGeneratorForJob(payload = {}) {
       lastOpenError = error;
       console.warn("Failed to open script generator panel via tab.", {
         tabId: tab.id,
-        error: formatError(error),
-      });
-    }
-  }
-
-  const windowIdsToTry = [tab.windowId, hasRequestedWindowId ? requestedWindowId : null]
-    .filter((windowId, index, all) => {
-      return Number.isInteger(windowId) && all.indexOf(windowId) === index;
-    });
-
-  for (const windowId of windowIdsToTry) {
-    if (panelOpened) {
-      break;
-    }
-
-    try {
-      await chrome.sidePanel.open({
-        windowId,
-      });
-      panelOpened = true;
-      console.info("Script generator panel opened via fallback window.", {
-        windowId,
-      });
-    } catch (error) {
-      lastOpenError = error;
-      console.warn("Failed to open script generator panel via fallback window.", {
-        windowId,
         error: formatError(error),
       });
     }
@@ -1825,6 +1843,7 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
   }).catch(() => {
     // no-op
   });
+  void syncScriptGeneratorPanelForTab(tabId);
   queueMonitorSuggestionsForTab(tabId, "tab-activated", 350);
 });
 
