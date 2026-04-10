@@ -33,7 +33,7 @@ const MONITOR_SUGGESTIONS_MODEL_OPTIONS = {
 };
 const MONITOR_SUGGESTIONS_CACHE_TTL_MS = 20 * 60 * 1000;
 const MONITOR_SUGGESTIONS_MAX_COUNT = 5;
-const MONITOR_SUGGESTIONS_MAX_TEXT_CHARS = 2000;
+const MONITOR_SUGGESTIONS_MAX_TEXT_CHARS = 500;
 const ACTION_ICON_SIZES = [16, 32, 48];
 const ACTION_ICON_PATHS = Object.freeze({
   16: "icons/icon-16.png",
@@ -48,6 +48,8 @@ const tabsWithSuggestionSignal = new Set();
 const lastSuggestionAnimationFingerprint = new Map();
 const monitorSuggestionsTriggerTimers = new Map();
 let actionIconBitmapsPromise;
+let monitorSuggestionsSessionPromise = null;
+let monitorSuggestionsPromptQueue = Promise.resolve();
 
 function isSupportedTabUrl(url) {
   if (!url) {
@@ -189,6 +191,13 @@ function clearMonitorSuggestionsTrigger(tabId) {
   }
 }
 
+function elapsedMsSince(startedAtMs) {
+  if (!Number.isFinite(startedAtMs)) {
+    return null;
+  }
+  return Math.max(0, Date.now() - startedAtMs);
+}
+
 async function maybeGenerateMonitorSuggestionsForTabId(tabId, reason) {
   const enabled = await getMonitorSuggestionsEnabled();
   if (!enabled) {
@@ -206,7 +215,10 @@ async function maybeGenerateMonitorSuggestionsForTabId(tabId, reason) {
     return;
   }
 
+  const triggerStartedAt = Date.now();
+  const triggerId = `${tabId}:${triggerStartedAt.toString(36)}`;
   console.info("[monitor-suggestions] background-trigger", {
+    triggerId,
     tabId,
     tabUrl: tab.url,
     reason,
@@ -216,6 +228,7 @@ async function maybeGenerateMonitorSuggestionsForTabId(tabId, reason) {
     forceRefresh: false,
   });
   console.info("[monitor-suggestions] background-trigger-result", {
+    triggerId,
     tabId,
     tabUrl: tab.url,
     reason,
@@ -227,6 +240,7 @@ async function maybeGenerateMonitorSuggestionsForTabId(tabId, reason) {
         ? Number(response.monitorabilityScore)
         : null,
     errorCode: response?.errorCode ?? null,
+    durationMs: elapsedMsSince(triggerStartedAt),
   });
 }
 
@@ -442,20 +456,22 @@ function extractSuggestionsFromModelJson(parsed) {
   };
 }
 
-async function parseSuggestionsFromModelResponse(text, session) {
+async function parseSuggestionsFromModelResponse(text) {
   try {
     return extractSuggestionsFromModelJson(parseJsonCandidates(text));
-  } catch (firstError) {
-    const repairPrompt = [
-      "Convert this output to strict RFC8259 JSON.",
-      "Return JSON only.",
-      "Do not use markdown fences.",
-      "Schema: {\"monitorabilityScore\": number, \"suggestions\":[\"...\"]}",
-      `Output:\n${String(text ?? "")}`,
-    ].join("\n");
+  } catch (_firstError) {
+    const rawText = String(text ?? "");
+    const lines = rawText
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => line.replace(/^[-*•]\s+/, "").replace(/^\d+[.)]\s+/, ""));
 
-    const repairedText = await session.prompt(repairPrompt);
-    return extractSuggestionsFromModelJson(parseJsonCandidates(repairedText));
+    const scoreMatch = rawText.match(/monitorability(?:\s*score)?["']?\s*[:=]\s*(10|[1-9])/i);
+    return {
+      suggestions: normalizeSuggestionArray(lines),
+      monitorabilityScore: normalizeMonitorabilityScore(scoreMatch?.[1]),
+    };
   }
 }
 
@@ -481,25 +497,53 @@ async function createMonitorSuggestionsSession() {
   });
 }
 
+async function getSharedMonitorSuggestionsSession() {
+  if (monitorSuggestionsSessionPromise) {
+    return monitorSuggestionsSessionPromise;
+  }
+
+  monitorSuggestionsSessionPromise = createMonitorSuggestionsSession().catch((error) => {
+    monitorSuggestionsSessionPromise = null;
+    throw error;
+  });
+
+  return monitorSuggestionsSessionPromise;
+}
+
+function queueMonitorSuggestionsPrompt(task) {
+  const queued = monitorSuggestionsPromptQueue.then(task, task);
+  monitorSuggestionsPromptQueue = queued.then(
+    () => undefined,
+    () => undefined
+  );
+  return queued;
+}
+
+async function promptMonitorSuggestions(promptText) {
+  return queueMonitorSuggestionsPrompt(async () => {
+    try {
+      const session = await getSharedMonitorSuggestionsSession();
+      return await session.prompt(promptText);
+    } catch (_error) {
+      // If a shared session goes stale, recreate once and retry.
+      monitorSuggestionsSessionPromise = null;
+      const session = await getSharedMonitorSuggestionsSession();
+      return session.prompt(promptText);
+    }
+  });
+}
+
 function buildMonitorSuggestionsPrompt(pageContext) {
   return [
-    "Suggest monitoring conditions for this webpage.",
-    "Return JSON only using this schema: {\"monitorabilityScore\": number, \"suggestions\":[\"...\"]}",
-    "Rules:",
-    "- monitorabilityScore must be an integer from 1 to 10.",
-    "- 1 means poor monitorability (static legal pages or pages changing too broadly/noisily).",
-    "- 10 means highly monitorable with specific valuable changes (for example a product page with price/stock).",
-    "- Each suggestion must be a short phrase that can complete: notify me when <suggestion>.",
-    "- Do not include the words 'notify me when'.",
-    "- Focus on meaningful changes over time.",
-    "- Avoid vague statements like 'something changes'.",
-    "- If the page looks like a product page, consider stock/price/discount ideas.",
-    "- If no useful change is monitorable, return an empty array.",
-    `Maximum suggestions: ${MONITOR_SUGGESTIONS_MAX_COUNT}.`,
-    `Page title: ${pageContext.title}`,
-    `Page URL: ${pageContext.url}`,
-    `Page excerpt:\n${pageContext.text}`,
-  ].join("\n\n");
+    "Return JSON only: {\"monitorabilityScore\":1-10,\"suggestions\":[\"...\"]}.",
+    "Score: 1=poor monitorability (static or too noisy), 10=high-value specific changes.",
+    `Suggestions: up to ${MONITOR_SUGGESTIONS_MAX_COUNT}, short suffixes for 'notify me when', no prefix text.`,
+    "Prefer meaningful change events; avoid vague items.",
+    "If nothing useful is monitorable, return an empty suggestions array.",
+    `Title: ${pageContext.title}`,
+    `URL: ${pageContext.url}`,
+    `Excerpt:\n${pageContext.text}`,
+  ].join("\n");
 }
 
 async function extractPageMonitorContext(tabId) {
@@ -740,22 +784,28 @@ async function getMonitorSuggestionsForTab(tab, { forceRefresh = false } = {}) {
 
   const tabId = Number(tab.id);
   const now = Date.now();
+  const requestStartedAt = now;
+  const requestId = `${tabId}:${requestStartedAt.toString(36)}`;
   const cached = monitorSuggestionsCache.get(tabId);
   console.info("[monitor-suggestions] request", {
+    requestId,
     tabId,
     tabUrl: tab.url,
     forceRefresh,
     hasCache: Boolean(cached),
+    elapsedMs: elapsedMsSince(requestStartedAt),
   });
 
   if (!forceRefresh && cached?.url === tab.url && now - cached.generatedAt < MONITOR_SUGGESTIONS_CACHE_TTL_MS) {
     const cachedSuggestions = Array.isArray(cached.suggestions) ? cached.suggestions : [];
     const monitorabilityScore = normalizeMonitorabilityScore(cached.monitorabilityScore);
     console.info("[monitor-suggestions] cache-hit", {
+      requestId,
       tabId,
       tabUrl: tab.url,
       suggestionsCount: cachedSuggestions.length,
       monitorabilityScore,
+      elapsedMs: elapsedMsSince(requestStartedAt),
     });
     setTabSuggestionSignal(
       tabId,
@@ -777,16 +827,22 @@ async function getMonitorSuggestionsForTab(tab, { forceRefresh = false } = {}) {
   const pending = monitorSuggestionsPending.get(tabId);
   if (!forceRefresh && pending?.url === tab.url) {
     console.info("[monitor-suggestions] pending-request-reused", {
+      requestId,
+      pendingRequestId: pending.requestId ?? null,
       tabId,
       tabUrl: tab.url,
+      elapsedMs: elapsedMsSince(requestStartedAt),
+      pendingElapsedMs: elapsedMsSince(pending.startedAt ?? null),
     });
     return pending.promise;
   }
 
   const promise = (async () => {
     console.info("[monitor-suggestions] extracting-page-context", {
+      requestId,
       tabId,
       tabUrl: tab.url,
+      elapsedMs: elapsedMsSince(requestStartedAt),
     });
     const context = await extractPageMonitorContext(tabId);
     const pageContext = {
@@ -796,10 +852,12 @@ async function getMonitorSuggestionsForTab(tab, { forceRefresh = false } = {}) {
     };
 
     console.info("[monitor-suggestions] page-context-ready", {
+      requestId,
       tabId,
       pageUrl: pageContext.url,
       titleLength: pageContext.title.length,
       textLength: pageContext.text.length,
+      elapsedMs: elapsedMsSince(requestStartedAt),
     });
 
     if (!pageContext.text) {
@@ -819,68 +877,63 @@ async function getMonitorSuggestionsForTab(tab, { forceRefresh = false } = {}) {
       setTabSuggestionSignal(tabId, false);
       syncActionIconAnimationForTab(tab);
       console.info("[monitor-suggestions] no-page-text", {
+        requestId,
         tabId,
         tabUrl: tab.url,
+        elapsedMs: elapsedMsSince(requestStartedAt),
       });
       return emptyResult;
     }
 
-    const session = await createMonitorSuggestionsSession();
-    try {
-      console.info("[monitor-suggestions] prompting-llm", {
-        tabId,
-        tabUrl: tab.url,
-      });
-      const modelText = await session.prompt(buildMonitorSuggestionsPrompt(pageContext));
-      const { suggestions, monitorabilityScore } = await parseSuggestionsFromModelResponse(modelText, session);
-      monitorSuggestionsCache.set(tabId, {
-        url: tab.url,
-        suggestions,
-        monitorabilityScore,
-        generatedAt: Date.now(),
-      });
-      console.info("[monitor-suggestions] llm-success", {
-        tabId,
-        tabUrl: tab.url,
-        suggestionsCount: suggestions.length,
-        monitorabilityScore,
-      });
-      const fingerprint = suggestions.length > 0
-        ? `${tab.url}::${suggestions.join("|").toLowerCase()}`
-        : "";
-      const previousFingerprint = lastSuggestionAnimationFingerprint.get(tabId);
-      if (fingerprint && previousFingerprint !== fingerprint) {
-        lastSuggestionAnimationFingerprint.set(tabId, fingerprint);
-      }
-      if (!fingerprint) {
-        lastSuggestionAnimationFingerprint.delete(tabId);
-      }
-
-      setTabSuggestionSignal(
-        tabId,
-        shouldAnimateForSuggestions({
-          suggestions,
-          monitorabilityScore,
-        })
-      );
-      syncActionIconAnimationForTab(tab);
-
-      return {
-        ok: true,
-        supportedPage: true,
-        suggestions,
-        monitorabilityScore,
-        source: "llm",
-      };
-    } finally {
-      if (typeof session.destroy === "function") {
-        try {
-          session.destroy();
-        } catch (_error) {
-          // no-op
-        }
-      }
+    console.info("[monitor-suggestions] prompting-llm", {
+      requestId,
+      tabId,
+      tabUrl: tab.url,
+      elapsedMs: elapsedMsSince(requestStartedAt),
+    });
+    const modelText = await promptMonitorSuggestions(buildMonitorSuggestionsPrompt(pageContext));
+    const { suggestions, monitorabilityScore } = await parseSuggestionsFromModelResponse(modelText);
+    monitorSuggestionsCache.set(tabId, {
+      url: tab.url,
+      suggestions,
+      monitorabilityScore,
+      generatedAt: Date.now(),
+    });
+    console.info("[monitor-suggestions] llm-success", {
+      requestId,
+      tabId,
+      tabUrl: tab.url,
+      suggestionsCount: suggestions.length,
+      monitorabilityScore,
+      elapsedMs: elapsedMsSince(requestStartedAt),
+    });
+    const fingerprint = suggestions.length > 0
+      ? `${tab.url}::${suggestions.join("|").toLowerCase()}`
+      : "";
+    const previousFingerprint = lastSuggestionAnimationFingerprint.get(tabId);
+    if (fingerprint && previousFingerprint !== fingerprint) {
+      lastSuggestionAnimationFingerprint.set(tabId, fingerprint);
     }
+    if (!fingerprint) {
+      lastSuggestionAnimationFingerprint.delete(tabId);
+    }
+
+    setTabSuggestionSignal(
+      tabId,
+      shouldAnimateForSuggestions({
+        suggestions,
+        monitorabilityScore,
+      })
+    );
+    syncActionIconAnimationForTab(tab);
+
+    return {
+      ok: true,
+      supportedPage: true,
+      suggestions,
+      monitorabilityScore,
+      source: "llm",
+    };
   })()
     .catch((error) => {
       const message = formatError(error);
@@ -891,10 +944,12 @@ async function getMonitorSuggestionsForTab(tab, { forceRefresh = false } = {}) {
       const errorCode = permissionLikeError ? "missing-host-permission" : "monitor-suggestions-failed";
 
       console.warn("[monitor-suggestions] failed", {
+        requestId,
         tabId,
         tabUrl: tab.url,
         errorCode,
         message,
+        elapsedMs: elapsedMsSince(requestStartedAt),
       });
       setTabSuggestionSignal(tabId, false);
       syncActionIconAnimationForTab(tab);
@@ -916,14 +971,18 @@ async function getMonitorSuggestionsForTab(tab, { forceRefresh = false } = {}) {
         monitorSuggestionsPending.delete(tabId);
       }
       console.info("[monitor-suggestions] request-finished", {
+        requestId,
         tabId,
         tabUrl: tab.url,
+        durationMs: elapsedMsSince(requestStartedAt),
       });
     });
 
   monitorSuggestionsPending.set(tabId, {
     url: tab.url,
     promise,
+    requestId,
+    startedAt: requestStartedAt,
   });
 
   return promise;
