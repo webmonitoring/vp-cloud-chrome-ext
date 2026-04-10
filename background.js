@@ -461,17 +461,30 @@ async function parseSuggestionsFromModelResponse(text) {
     return extractSuggestionsFromModelJson(parseJsonCandidates(text));
   } catch (_firstError) {
     const rawText = String(text ?? "");
-    const lines = rawText
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .map((line) => line.replace(/^[-*•]\s+/, "").replace(/^\d+[.)]\s+/, ""));
+    try {
+      const repairPrompt = [
+        "Convert the output below to strict RFC8259 JSON.",
+        "Return JSON only, no markdown fences.",
+        "Schema: {\"monitorabilityScore\": number, \"suggestions\":[\"...\"]}",
+        `Output:\n${rawText}`,
+      ].join("\n");
+      const repairedText = await promptMonitorSuggestions(repairPrompt);
+      return extractSuggestionsFromModelJson(parseJsonCandidates(repairedText));
+    } catch (_repairError) {
+      const lines = rawText
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line) => line.replace(/^[-*•]\s+/, "").replace(/^\d+[.)]\s+/, ""))
+        .filter((line) => !/^json$/i.test(line))
+        .filter((line) => !/^return json only/i.test(line));
 
-    const scoreMatch = rawText.match(/monitorability(?:\s*score)?["']?\s*[:=]\s*(10|[1-9])/i);
-    return {
-      suggestions: normalizeSuggestionArray(lines),
-      monitorabilityScore: normalizeMonitorabilityScore(scoreMatch?.[1]),
-    };
+      const scoreMatch = rawText.match(/monitorability(?:\s*score)?["']?\s*[:=]\s*(10|[1-9])/i);
+      return {
+        suggestions: normalizeSuggestionArray(lines),
+        monitorabilityScore: normalizeMonitorabilityScore(scoreMatch?.[1]),
+      };
+    }
   }
 }
 
