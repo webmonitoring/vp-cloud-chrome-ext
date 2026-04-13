@@ -593,7 +593,7 @@ async function promptMonitorSuggestions(promptText) {
 function buildMonitorSuggestionsPrompt(pageContext) {
   return [
     "Return JSON only: {\"monitorabilityScore\":1-10,\"suggestions\":[\"...\"]}.",
-    "Score: 1=poor monitorability (static or too noisy), 10=high-value specific changes.",
+    "Score: 1=poor monitorability (static or too noisy), 10=high-value specific changes (blogs, product pages etc)",
     `Suggestions: up to ${MONITOR_SUGGESTIONS_MAX_COUNT}, short suffixes for 'notify me when', no prefix text.`,
     "Prefer meaningful change events; avoid vague items.",
     "If nothing useful is monitorable, return an empty suggestions array.",

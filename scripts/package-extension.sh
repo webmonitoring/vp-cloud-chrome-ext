@@ -16,6 +16,7 @@ zip -r "$ZIP_PATH" \
   background.js \
   popup.html popup.js popup.css \
   script_generator.html script_generator.js script_generator.css \
+  icons \
   lib
 
 echo "Created ${ZIP_PATH}"
