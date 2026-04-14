@@ -18,6 +18,7 @@ const uiState = {
     openingScriptJobId: null,
   },
   createWorkspaceId: "",
+  createAlertCondition: "",
   settings: {
     monitorSuggestionsEnabled: false,
     savingMonitorSuggestionsEnabled: false,
@@ -221,7 +222,7 @@ function renderCreateTab() {
       <label class="create-form__label">
         Alert me when:
         <div class="important-definition-input">
-          <textarea id="alert-condition" name="alertCondition" placeholder="Enter a condition or pick from below" required></textarea>
+          <textarea id="alert-condition" name="alertCondition" placeholder="Enter a condition or pick from below" required>${escapeHtml(uiState.createAlertCondition)}</textarea>
           <span class="important-definition-input__pulse" aria-hidden="true"></span>
         </div>
       </label>
@@ -461,6 +462,11 @@ function getCurrentJobFromList(jobId) {
   return uiState.jobs.data?.jobs?.find((job) => String(job.id) === String(jobId)) ?? null;
 }
 
+function isSupportedTabUrl(url) {
+  const value = String(url ?? "");
+  return value.startsWith("http://") || value.startsWith("https://");
+}
+
 async function ensureTabPermission(url) {
   const origin = new URL(url).origin;
   const originPattern = `${origin}/*`;
@@ -479,16 +485,17 @@ function applyMonitorSuggestion(value) {
     return;
   }
 
+  uiState.createAlertCondition = suggestion;
+  uiState.suggestions.selected = suggestion;
+  renderApp();
+
   const textarea = document.querySelector("#alert-condition");
-  if (!textarea) {
+  if (!(textarea instanceof HTMLTextAreaElement)) {
     return;
   }
 
-  textarea.value = suggestion;
-  uiState.suggestions.selected = suggestion;
   textarea.focus();
   textarea.setSelectionRange(textarea.value.length, textarea.value.length);
-  renderApp();
 }
 
 async function loadMonitorSuggestions({ forceRefresh = false } = {}) {
@@ -625,7 +632,9 @@ async function handleCreateJobSubmit(event) {
   event.preventDefault();
 
   const app = document.querySelector("#app");
-  const alertCondition = app.querySelector("#alert-condition")?.value?.trim() ?? "";
+  const rawAlertCondition = app.querySelector("#alert-condition")?.value ?? uiState.createAlertCondition ?? "";
+  uiState.createAlertCondition = String(rawAlertCondition);
+  const alertCondition = String(rawAlertCondition).trim();
   const interval = app.querySelector("#interval")?.value ?? "1440";
 
   if (!alertCondition) {
@@ -664,7 +673,7 @@ async function handleCreateJobSubmit(event) {
     payload: {
       alertCondition,
       interval,
-      workspaceId,
+      ...(workspaceId !== undefined ? { workspaceId } : {}),
     },
   });
 
@@ -869,6 +878,31 @@ async function handleOpenScriptAction(jobId) {
     return;
   }
 
+  if (!isSupportedTabUrl(job.url)) {
+    uiState.jobsFlash = {
+      type: "error",
+      text: "Script generation requires an http:// or https:// job URL.",
+    };
+    renderApp();
+    return;
+  }
+
+  const popupTab = uiState.popupState?.tab ?? null;
+  const popupWindowId = Number(popupTab?.windowId);
+  const hasPopupWindowId = Number.isInteger(popupWindowId) && popupWindowId >= 0;
+  let panelOpened = false;
+  let panelOpenError = null;
+
+  if (hasPopupWindowId && chrome.sidePanel?.open) {
+    try {
+      // Open immediately from the click handler so Chrome treats this as a user gesture.
+      await chrome.sidePanel.open({ windowId: popupWindowId });
+      panelOpened = true;
+    } catch (error) {
+      panelOpenError = error;
+    }
+  }
+
   uiState.jobs.openingScriptJobId = job.id;
   uiState.jobsFlash = null;
   renderApp();
@@ -885,16 +919,15 @@ async function handleOpenScriptAction(jobId) {
     return;
   }
 
-  const focusedWindow = await chrome.windows.getLastFocused({ populate: false });
-  const targetWindowId = focusedWindow?.id;
-
   const response = await chrome.runtime.sendMessage({
     type: "open-script-generator",
     payload: {
       jobId: job.id,
       url: job.url,
       description: job.description,
-      ...(Number.isInteger(targetWindowId) ? { windowId: targetWindowId } : {}),
+      ...(hasPopupWindowId ? { windowId: popupWindowId } : {}),
+      // The popup opens panel immediately for user gesture compatibility,
+      // but background should still try opening after creating/activating the target tab.
       openPanel: true,
     },
   });
@@ -910,7 +943,23 @@ async function handleOpenScriptAction(jobId) {
     return;
   }
 
-  window.close();
+  if (!panelOpened && response?.openedPanel !== true) {
+    const openError = response?.panelOpenError ?? panelOpenError;
+    uiState.jobsFlash = {
+      type: "error",
+      text: `Could not open the script generator panel. ${
+        openError instanceof Error ? openError.message : String(openError ?? "Unknown side panel error.")
+      }`,
+    };
+    renderApp();
+    return;
+  }
+
+  uiState.jobsFlash = {
+    type: "success",
+    text: "Script generator opened. Add actions in the side panel, then click Save To Job.",
+  };
+  renderApp();
 }
 
 function scheduleJobsSearch(value) {
@@ -940,6 +989,10 @@ function bindEvents() {
 
   document.querySelector("#create-job-form")?.addEventListener("submit", (event) => {
     void handleCreateJobSubmit(event);
+  });
+
+  document.querySelector("#alert-condition")?.addEventListener("input", (event) => {
+    uiState.createAlertCondition = String(event.target?.value ?? "");
   });
 
   document.querySelector("#create-workspace")?.addEventListener("change", (event) => {

@@ -23,6 +23,17 @@ When the popup opens on a normal website page:
 
 After a job is created, the background service worker listens to `chrome.cookies.onChanged` and updates tracked Visualping Cloud jobs whose host matches the changed cookie domain.
 
+### Script Action Side Panel Behavior
+
+- In the `Jobs` tab, clicking the wrench (`🔧`) on a job opens the Script Generator side panel for that job.
+- Side panel open is initiated immediately from the popup click handler (user gesture context) to satisfy Chrome's `sidePanel.open()` gesture requirement.
+- The popup does not force-close itself; Chrome may close it naturally once focus moves to the new job tab.
+- Script Generator panel visibility is scoped to the active tab: switching to another tab hides/disables it there, and switching back to the originating tab restores it.
+- The extension always opens the job URL in a new tab and attaches the Script Generator side panel to that new tab.
+- The new tab is created in the current window when possible; if that hint is stale, the extension falls back to creating the tab in any available window.
+- Tab/context wiring is done in the background before that new tab is activated, so the side panel does not load without job context.
+- The side panel is opened with compatibility fallbacks (`tabId` first, then `windowId`) so it works across Chrome side panel API variants.
+
 ## How It Works
 
 - The extension loads config from `https://localhost:3000/config.json` first, then falls back to cached config, then finally to production Visualping endpoints.

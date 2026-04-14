@@ -119,15 +119,27 @@ function sleep(ms) {
 }
 
 async function waitForScriptGeneratorContext() {
-  const attempts = 24;
+  const attempts = 120;
   const delayMs = 250;
   let lastError = "No script generator context found for this tab.";
 
   for (let index = 0; index < attempts; index += 1) {
-    const contextResponse = await chrome.runtime.sendMessage({
-      type: "script-generator-context",
-      payload: Number.isInteger(state.tabId) ? { tabId: state.tabId } : {},
-    });
+    const activeTab = await getCurrentActiveTab().catch(() => null);
+    const activeTabId = Number(activeTab?.id);
+    if (Number.isInteger(activeTabId) && activeTabId > 0) {
+      state.tabId = activeTabId;
+    }
+
+    let contextResponse = null;
+    try {
+      contextResponse = await chrome.runtime.sendMessage({
+        type: "script-generator-context",
+        payload: Number.isInteger(state.tabId) ? { tabId: state.tabId } : {},
+      });
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+      contextResponse = null;
+    }
 
     if (contextResponse?.ok && contextResponse.context) {
       const contextTabId = Number(contextResponse.context.tabId);
@@ -138,13 +150,6 @@ async function waitForScriptGeneratorContext() {
     }
 
     lastError = contextResponse?.error ?? lastError;
-
-    if (!Number.isInteger(state.tabId)) {
-      const activeTab = await getCurrentActiveTab();
-      if (activeTab?.id) {
-        state.tabId = activeTab.id;
-      }
-    }
 
     if (index < attempts - 1) {
       await sleep(delayMs);

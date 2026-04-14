@@ -37,6 +37,19 @@ Primary capabilities:
 4. Background reads site cookies and writes cookie preactions to matching Visualping jobs.
 5. Side panel script generator inspects DOM via `chrome.scripting.executeScript`, prompts local model for structured steps, executes steps in-tab, validates, then saves.
 
+## Script Action Side Panel Spec
+
+- The wrench icon (`🔧`) in each job row is the entrypoint for adding script actions.
+- Clicking the wrench should open the Script Generator side panel for that job and bind context (`jobId`, `url`, `tabId`) before generation starts.
+- Trigger side panel open immediately from the popup click handler so `chrome.sidePanel.open()` executes in a user gesture context.
+- Do not call `window.close()` from popup flow; Chrome may still close the popup naturally once focus moves to a new tab.
+- Keep script generator side panel tab-scoped to the active tab: disable it on non-active tabs in the same window, and re-enable/reopen when returning to the context tab.
+- Always open the job URL in a new tab for script actions; do not retarget the currently active page tab.
+- Prefer creating the new tab in the current window when available. If the window hint is unavailable/stale, fall back to any available browser window.
+- Background orchestration must set script-generator context and tab-specific side panel options before activating the new tab to avoid context races.
+- Side panel open must try API-compatible targets in order: `tabId` first, then `windowId`.
+- If panel open fails, return a clear error string to popup UI rather than silently failing.
+
 ## Build / Package
 
 No compile step is required.

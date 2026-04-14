@@ -128,19 +128,95 @@ async function getLatestScriptGeneratorContext() {
     })[0] ?? null;
 }
 
+function getSidePanelOpenTargetsForTab(tab) {
+  const targets = [];
+  const tabId = Number(tab?.id);
+  const windowId = Number(tab?.windowId);
+
+  if (Number.isInteger(tabId) && tabId > 0) {
+    targets.push({ tabId });
+  }
+
+  if (Number.isInteger(windowId) && windowId >= 0) {
+    targets.push({ windowId });
+  }
+
+  return targets;
+}
+
+async function openSidePanelForTab(tab) {
+  if (!chrome.sidePanel?.open) {
+    return {
+      opened: false,
+      attempts: [],
+    };
+  }
+
+  const attempts = [];
+  for (const target of getSidePanelOpenTargetsForTab(tab)) {
+    try {
+      await chrome.sidePanel.open(target);
+      attempts.push({
+        target,
+        ok: true,
+      });
+      return {
+        opened: true,
+        attempts,
+      };
+    } catch (error) {
+      attempts.push({
+        target,
+        ok: false,
+        error: formatError(error),
+      });
+    }
+  }
+
+  return {
+    opened: false,
+    attempts,
+  };
+}
+
 async function syncScriptGeneratorPanelForTab(tabId) {
   if (!Number.isInteger(tabId) || tabId <= 0 || !chrome.sidePanel?.setOptions) {
     return;
   }
 
-  const context = await getScriptGeneratorContext(tabId);
+  let activeTab = null;
+  let tabsInWindow = [];
   try {
-    await chrome.sidePanel.setOptions({
-      enabled: false,
-    });
+    activeTab = await chrome.tabs.get(tabId);
+    if (Number.isInteger(activeTab?.windowId) && activeTab.windowId >= 0) {
+      tabsInWindow = await chrome.tabs.query({
+        windowId: activeTab.windowId,
+      });
+    }
   } catch (_error) {
     // Best effort only.
   }
+
+  const otherTabIds = tabsInWindow
+    .map((tab) => Number(tab?.id))
+    .filter((otherTabId) => Number.isInteger(otherTabId) && otherTabId > 0 && otherTabId !== tabId);
+
+  if (otherTabIds.length) {
+    await Promise.all(
+      otherTabIds.map(async (otherTabId) => {
+        try {
+          await chrome.sidePanel.setOptions({
+            tabId: otherTabId,
+            enabled: false,
+          });
+        } catch (_error) {
+          // Best effort only.
+        }
+      })
+    );
+  }
+
+  const context = await getScriptGeneratorContext(tabId);
 
   if (!context) {
     try {
@@ -161,15 +237,8 @@ async function syncScriptGeneratorPanelForTab(tabId) {
     path: panelPath,
   });
 
-  if (!chrome.sidePanel?.open) {
-    return;
-  }
-
-  try {
-    await chrome.sidePanel.open({ tabId });
-  } catch (_error) {
-    // Best effort only.
-  }
+  const tab = activeTab ?? (await chrome.tabs.get(tabId).catch(() => ({ id: tabId })));
+  await openSidePanelForTab(tab);
 }
 
 function toNumberOrNull(value) {
@@ -1369,6 +1438,15 @@ async function buildPopupState() {
     })
     .filter(Boolean);
   const preferredWorkspaceId = getPreferredWorkspaceId(session);
+  const tabSummary = tab
+    ? {
+        id: tab.id,
+        windowId: tab.windowId ?? null,
+        title: tab.title ?? "",
+        url: tab.url ?? "",
+        hostname: getHostname(tab.url),
+      }
+    : null;
 
   if (!tab || !isSupportedTabUrl(tab.url)) {
     return {
@@ -1383,6 +1461,7 @@ async function buildPopupState() {
       monitorSuggestionsEnabled,
       isBusinessUser,
       userEmail,
+      tab: tabSummary,
     };
   }
 
@@ -1396,6 +1475,8 @@ async function buildPopupState() {
     loginUrl,
     configSource: config.__source,
     tab: {
+      id: tab.id,
+      windowId: tab.windowId ?? null,
       title: tab.title ?? hostname,
       url: tab.url,
       hostname,
@@ -1427,9 +1508,12 @@ async function createJobForActiveTab({ alertCondition, interval, workspaceId: re
 
   const session = await requireSession(config);
   const cookies = await getCookiesForPage(tab.url);
-  const workspaceId = Number.isFinite(Number(requestedWorkspaceId))
+  const fallbackWorkspaceId = getPreferredWorkspaceId(session);
+  const workspaceId = Number.isFinite(Number(requestedWorkspaceId)) && Number(requestedWorkspaceId) > 0
     ? Number(requestedWorkspaceId)
-    : getPreferredWorkspaceId(session);
+    : Number.isFinite(Number(fallbackWorkspaceId)) && Number(fallbackWorkspaceId) > 0
+      ? Number(fallbackWorkspaceId)
+      : undefined;
   const payload = buildCreateJobPayload({
     url: tab.url,
     title: tab.title,
@@ -1608,31 +1692,45 @@ async function openScriptGeneratorForJob(payload = {}) {
   const requestedWindowId = Number(payload.windowId);
   const hasRequestedWindowId = Number.isInteger(requestedWindowId) && requestedWindowId >= 0;
 
-  let panelOpened = false;
-  let lastOpenError = null;
-
   let tab = null;
   if (hasRequestedTabId) {
     try {
       tab = await chrome.tabs.get(requestedTabId);
     } catch (error) {
-      throw new Error(`Could not find tab #${requestedTabId} for script generation. ${formatError(error)}`);
+      console.warn(`Could not use requested tab #${requestedTabId} for script generation.`, {
+        error: formatError(error),
+      });
     }
   }
 
   if (!tab) {
-    tab = await chrome.tabs.create({
-      url,
-      active: true,
-      ...(hasRequestedWindowId ? { windowId: requestedWindowId } : {}),
-    });
+    if (hasRequestedWindowId) {
+      try {
+        tab = await chrome.tabs.create({
+          url,
+          active: false,
+          windowId: requestedWindowId,
+        });
+      } catch (error) {
+        console.warn(`Could not create script-generator tab in requested window #${requestedWindowId}.`, {
+          error: formatError(error),
+        });
+      }
+    }
+
+    if (!tab) {
+      tab = await chrome.tabs.create({
+        url,
+        active: false,
+      });
+    }
   }
 
   if (!tab?.id) {
     throw new Error("Unable to open a browser tab for this job.");
   }
 
-  if (tab.url !== url) {
+  if (String(tab.url ?? "") !== url) {
     try {
       await chrome.tabs.update(tab.id, {
         url,
@@ -1640,24 +1738,6 @@ async function openScriptGeneratorForJob(payload = {}) {
     } catch (_error) {
       // Best effort only.
     }
-  }
-
-  if (Number.isInteger(tab.windowId)) {
-    try {
-      await chrome.windows.update(tab.windowId, {
-        focused: true,
-      });
-    } catch (_error) {
-      // Best effort only.
-    }
-  }
-
-  try {
-    await chrome.tabs.update(tab.id, {
-      active: true,
-    });
-  } catch (_error) {
-    // Best effort only.
   }
 
   const context = {
@@ -1672,53 +1752,76 @@ async function openScriptGeneratorForJob(payload = {}) {
 
   await setScriptGeneratorContext(tab.id, context);
 
-  try {
-    await chrome.sidePanel.setOptions({
-      enabled: false,
-    });
-  } catch (_error) {
-    // Best effort only.
-  }
-
   await chrome.sidePanel.setOptions({
     tabId: tab.id,
     enabled: true,
     path: panelPath,
   });
 
+  if (Number.isInteger(tab.windowId)) {
+    try {
+      await chrome.windows.update(tab.windowId, {
+        focused: true,
+      });
+    } catch (_error) {
+      // Best effort only.
+    }
+  }
+
+  try {
+    const updatedTab = await chrome.tabs.update(tab.id, {
+      active: true,
+    });
+    if (updatedTab?.id) {
+      tab = updatedTab;
+    }
+  } catch (_error) {
+    // Best effort only.
+  }
+
   if (!shouldOpenPanel) {
     return {
       ok: true,
       tabId: tab.id,
+      openedPanel: false,
     };
   }
 
-  if (!panelOpened) {
-    try {
-      await chrome.sidePanel.open({ tabId: tab.id });
-      panelOpened = true;
-      console.info("Script generator panel opened via tab.", {
-        tabId: tab.id,
-      });
-    } catch (error) {
-      lastOpenError = error;
-      console.warn("Failed to open script generator panel via tab.", {
-        tabId: tab.id,
-        error: formatError(error),
-      });
-    }
+  const panelOpenResult = await openSidePanelForTab(tab);
+  if (!panelOpenResult.opened) {
+    const details = panelOpenResult.attempts.length
+      ? panelOpenResult.attempts
+          .map((attempt) => {
+            const targetLabel = attempt.target.tabId
+              ? `tabId=${attempt.target.tabId}`
+              : `windowId=${attempt.target.windowId}`;
+            return `${targetLabel}: ${attempt.error ?? "Unknown side panel error."}`;
+          })
+          .join(" | ")
+      : "Unknown side panel error.";
+    console.warn("Could not open side panel automatically for script generator.", {
+      tabId: tab.id,
+      attempts: panelOpenResult.attempts,
+    });
+    return {
+      ok: true,
+      tabId: tab.id,
+      openedPanel: false,
+      panelOpenError: details,
+      panelOpenAttempts: panelOpenResult.attempts,
+    };
   }
 
-  if (!panelOpened) {
-    const details = lastOpenError ? formatError(lastOpenError) : "Unknown side panel error.";
-    throw new Error(
-      `Could not open side panel automatically. ${details}`
-    );
-  }
+  console.info("Script generator panel opened.", {
+    tabId: tab.id,
+    attempts: panelOpenResult.attempts,
+  });
 
   return {
     ok: true,
     tabId: tab.id,
+    openedPanel: true,
+    panelOpenAttempts: panelOpenResult.attempts,
   };
 }
 
@@ -1726,9 +1829,23 @@ async function getScriptGeneratorContextForTab(payload = {}) {
   const requestedTabId = Number(payload.tabId);
   const hasRequestedTabId = Number.isInteger(requestedTabId) && requestedTabId > 0;
 
-  const context = hasRequestedTabId ? await getScriptGeneratorContext(requestedTabId) : null;
-  const fallbackContext = context ?? (await getLatestScriptGeneratorContext());
-  if (!fallbackContext) {
+  if (hasRequestedTabId) {
+    const context = await getScriptGeneratorContext(requestedTabId);
+    if (context) {
+      return {
+        ok: true,
+        context,
+      };
+    }
+
+    return {
+      ok: false,
+      error: "No script generator context found for this tab. Start from the Jobs tab in the extension popup.",
+    };
+  }
+
+  const latestContext = await getLatestScriptGeneratorContext();
+  if (!latestContext) {
     return {
       ok: false,
       error: "No script generator context found for this tab. Start from the Jobs tab in the extension popup.",
@@ -1737,7 +1854,7 @@ async function getScriptGeneratorContextForTab(payload = {}) {
 
   return {
     ok: true,
-    context: fallbackContext,
+    context: latestContext,
   };
 }
 
