@@ -25,6 +25,7 @@ import {
 
 const DEFAULT_JOBS_PAGE_SIZE = 10;
 const syncState = new Map();
+const VISUALPING_AUTH_COOKIE_NAMES = new Set(["assumedIdToken", "idToken"]);
 const SCRIPT_GENERATOR_CONTEXT_PREFIX = "scriptGeneratorContext:";
 const SCRIPT_GENERATOR_LATEST_CONTEXT_KEY = "scriptGeneratorContextLatest";
 const MONITOR_SUGGESTIONS_MODEL_OPTIONS = {
@@ -40,7 +41,7 @@ const ACTION_ICON_PATHS = Object.freeze({
   32: "icons/icon-32.png",
   48: "icons/icon-48.png",
 });
-const MONITOR_SUGGESTIONS_TRIGGER_DELAY_MS = 900;
+const MONITOR_SUGGESTIONS_TRIGGER_DELAY_MS = 3000;
 const monitorSuggestionsCache = new Map();
 const monitorSuggestionsPending = new Map();
 const iconAnimationState = new Map();
@@ -50,6 +51,9 @@ const monitorSuggestionsTriggerTimers = new Map();
 let actionIconBitmapsPromise;
 let monitorSuggestionsSessionPromise = null;
 let monitorSuggestionsPromptQueue = Promise.resolve();
+let cookieSyncAccountKeyCache = "";
+let cookieSyncAccountKeyLoadPromise = null;
+let cookieSyncAccountCacheVersion = 0;
 
 function isSupportedTabUrl(url) {
   if (!url) {
@@ -77,6 +81,25 @@ function safeParseUrl(url) {
 
 function getHostname(url) {
   return safeParseUrl(url)?.hostname ?? "";
+}
+
+function normalizeCookieDomain(domain) {
+  return String(domain ?? "").replace(/^\./, "").toLowerCase();
+}
+
+function isVisualpingAuthCookie(cookie) {
+  if (!cookie?.name || !VISUALPING_AUTH_COOKIE_NAMES.has(cookie.name)) {
+    return false;
+  }
+
+  const domain = normalizeCookieDomain(cookie.domain);
+  return domain === "visualping.io" || domain.endsWith(".visualping.io");
+}
+
+function clearCookieSyncAccountKeyCache() {
+  cookieSyncAccountKeyCache = "";
+  cookieSyncAccountKeyLoadPromise = null;
+  cookieSyncAccountCacheVersion += 1;
 }
 
 function scriptGeneratorContextKey(tabId) {
@@ -1177,9 +1200,11 @@ async function getCookiesForPage(url) {
 async function requireSession(config) {
   const session = await checkVisualpingSession(config);
   if (!session.loggedIn || !session.token) {
+    clearCookieSyncAccountKeyCache();
     throw new Error("Log in to Visualping before managing monitoring jobs.");
   }
 
+  updateCookieSyncAccountKeyCacheFromSession(session);
   return session;
 }
 
@@ -1200,6 +1225,78 @@ function getUserEmail(session) {
   return candidateValues
     .map((value) => String(value ?? "").trim())
     .find((value) => value.includes("@")) ?? "";
+}
+
+function getUserId(session) {
+  const candidateValues = [
+    session.user?.id,
+    session.user?.userId,
+    session.user?.uid,
+    session.user?._id,
+    session.user?.attributes?.id,
+    session.user?.attributes?.sub,
+    session.user?.profile?.id,
+  ];
+
+  return candidateValues.map((value) => String(value ?? "").trim()).find(Boolean) ?? "";
+}
+
+function getSessionAccountKey(session) {
+  const userId = getUserId(session);
+  if (userId) {
+    return `user:${encodeURIComponent(userId)}`;
+  }
+
+  const email = getUserEmail(session).toLowerCase();
+  if (email) {
+    return `email:${encodeURIComponent(email)}`;
+  }
+
+  return "";
+}
+
+function requireSessionAccountKey(session) {
+  const accountKey = getSessionAccountKey(session);
+  if (!accountKey) {
+    throw new Error("Could not determine the logged-in Visualping user identity.");
+  }
+
+  return accountKey;
+}
+
+function updateCookieSyncAccountKeyCacheFromSession(session) {
+  cookieSyncAccountKeyCache = getSessionAccountKey(session);
+  return cookieSyncAccountKeyCache;
+}
+
+async function ensureCookieSyncAccountKeyCache() {
+  if (cookieSyncAccountKeyCache) {
+    return cookieSyncAccountKeyCache;
+  }
+
+  if (!cookieSyncAccountKeyLoadPromise) {
+    const expectedVersion = cookieSyncAccountCacheVersion;
+    cookieSyncAccountKeyLoadPromise = (async () => {
+      const config = await loadPublicConfig();
+      const session = await checkVisualpingSession(config);
+      if (!session.loggedIn || !session.token) {
+        if (expectedVersion === cookieSyncAccountCacheVersion) {
+          cookieSyncAccountKeyCache = "";
+        }
+        return "";
+      }
+
+      const resolvedAccountKey = getSessionAccountKey(session);
+      if (expectedVersion === cookieSyncAccountCacheVersion) {
+        cookieSyncAccountKeyCache = resolvedAccountKey;
+      }
+      return resolvedAccountKey;
+    })().finally(() => {
+      cookieSyncAccountKeyLoadPromise = null;
+    });
+  }
+
+  return cookieSyncAccountKeyLoadPromise;
 }
 
 function getPreferredWorkspaceId(session) {
@@ -1355,7 +1452,8 @@ async function listJobsForPopup(payload = {}) {
   const query = normalizeJobsQuery(payload);
   const config = await loadPublicConfig();
   const session = await requireSession(config);
-  const trackedJobs = await listTrackedJobs();
+  const accountKey = requireSessionAccountKey(session);
+  const trackedJobs = await listTrackedJobs(accountKey);
   const trackedJobsById = new Map(
     trackedJobs.map((job) => {
       return [Number(job.jobId), job];
@@ -1422,6 +1520,11 @@ async function buildPopupState() {
   const tab = await getActiveTab();
   const loginUrl = buildLoginUrl(config);
   const session = await checkVisualpingSession(config);
+  if (session.loggedIn && session.token) {
+    updateCookieSyncAccountKeyCacheFromSession(session);
+  } else {
+    clearCookieSyncAccountKeyCache();
+  }
   const monitorSuggestionsEnabled = await getMonitorSuggestionsEnabled();
   const isBusinessUser = getOrganisationId(session) !== null;
   const userEmail = getUserEmail(session);
@@ -1466,7 +1569,8 @@ async function buildPopupState() {
   }
 
   const hostname = getHostname(tab.url);
-  const trackedJobs = await listTrackedJobsForHost(hostname);
+  const accountKey = session.loggedIn ? getSessionAccountKey(session) : "";
+  const trackedJobs = accountKey ? await listTrackedJobsForHost(hostname, accountKey) : [];
 
   return {
     ok: true,
@@ -1507,6 +1611,7 @@ async function createJobForActiveTab({ alertCondition, interval, workspaceId: re
   await ensureSitePermission(tab.url);
 
   const session = await requireSession(config);
+  const accountKey = requireSessionAccountKey(session);
   const cookies = await getCookiesForPage(tab.url);
   const fallbackWorkspaceId = getPreferredWorkspaceId(session);
   const workspaceId = Number.isFinite(Number(requestedWorkspaceId)) && Number(requestedWorkspaceId) > 0
@@ -1541,7 +1646,7 @@ async function createJobForActiveTab({ alertCondition, interval, workspaceId: re
     cookieCount: cookies.length,
     status: STATUS.synced,
     lastError: null,
-  });
+  }, accountKey);
 
   return {
     ok: true,
@@ -1557,8 +1662,10 @@ async function toggleCookieSyncForJob(payload = {}) {
   }
 
   const config = await loadPublicConfig();
+  const session = await requireSession(config);
+  const accountKey = requireSessionAccountKey(session);
   if (payload.enabled === false) {
-    await removeTrackedJob(jobId);
+    await removeTrackedJob(jobId, accountKey);
     return {
       ok: true,
       enabled: false,
@@ -1575,10 +1682,9 @@ async function toggleCookieSyncForJob(payload = {}) {
     throw new Error("Site permission is required to read and sync that page's cookies.");
   }
 
-  const session = await requireSession(config);
   const cookies = await getCookiesForPage(url);
   const now = new Date().toISOString();
-  const trackedJob = await getTrackedJob(jobId);
+  const trackedJob = await getTrackedJob(jobId, accountKey);
   const host = getHostname(url);
   const workspaceId = getPreferredWorkspaceId(session);
   const jobDetails = await getVisualpingJob(config, session.token, jobId, {
@@ -1611,7 +1717,7 @@ async function toggleCookieSyncForJob(payload = {}) {
     cookieCount: cookies.length,
     status: STATUS.synced,
     lastError: null,
-  });
+  }, accountKey);
 
   return {
     ok: true,
@@ -1621,8 +1727,8 @@ async function toggleCookieSyncForJob(payload = {}) {
   };
 }
 
-async function syncCookiesForJob(jobId) {
-  const trackedJob = await getTrackedJob(jobId);
+async function syncCookiesForJob(accountKey, jobId) {
+  const trackedJob = await getTrackedJob(jobId, accountKey);
   if (!trackedJob) {
     return;
   }
@@ -1632,17 +1738,23 @@ async function syncCookiesForJob(jobId) {
     await updateTrackedJob(jobId, {
       status: STATUS.error,
       lastError: "Missing site permission for cookie sync.",
-    });
+    }, accountKey);
     return;
   }
 
   const config = await loadPublicConfig();
   const session = await checkVisualpingSession(config);
   if (!session.loggedIn || !session.token) {
+    clearCookieSyncAccountKeyCache();
     await updateTrackedJob(jobId, {
       status: STATUS.error,
       lastError: "Visualping session is missing or expired.",
-    });
+    }, accountKey);
+    return;
+  }
+
+  const activeAccountKey = updateCookieSyncAccountKeyCacheFromSession(session);
+  if (!activeAccountKey || activeAccountKey !== accountKey) {
     return;
   }
 
@@ -1668,7 +1780,7 @@ async function syncCookiesForJob(jobId) {
     cookieCount: cookies.length,
     lastSyncedAt: new Date().toISOString(),
     lastError: null,
-  });
+  }, accountKey);
 }
 
 async function openScriptGeneratorForJob(payload = {}) {
@@ -1896,11 +2008,22 @@ async function saveScriptActionForJob(payload = {}) {
   };
 }
 
-function queueCookieSync(jobId) {
-  const key = String(jobId);
+function cookieSyncQueueKey(accountKey, jobId) {
+  return `${accountKey}::${jobId}`;
+}
+
+function queueCookieSync(accountKey, jobId) {
+  const normalizedJobId = Number(jobId);
+  if (!accountKey || !Number.isInteger(normalizedJobId) || normalizedJobId <= 0) {
+    return;
+  }
+
+  const key = cookieSyncQueueKey(accountKey, normalizedJobId);
   const currentState = syncState.get(key) ?? {
     running: false,
     pending: false,
+    accountKey,
+    jobId: normalizedJobId,
   };
 
   currentState.pending = true;
@@ -1911,8 +2034,8 @@ function queueCookieSync(jobId) {
   }
 }
 
-async function drainCookieSyncQueue(jobId) {
-  const state = syncState.get(jobId);
+async function drainCookieSyncQueue(queueKey) {
+  const state = syncState.get(queueKey);
   if (!state) {
     return;
   }
@@ -1923,29 +2046,44 @@ async function drainCookieSyncQueue(jobId) {
     state.pending = false;
 
     try {
-      await syncCookiesForJob(jobId);
+      await syncCookiesForJob(state.accountKey, state.jobId);
     } catch (error) {
-      console.error(`Cookie sync failed for job ${jobId}.`, error);
-      await updateTrackedJob(jobId, {
+      console.error(`Cookie sync failed for account ${state.accountKey} job ${state.jobId}.`, error);
+      await updateTrackedJob(state.jobId, {
         status: STATUS.error,
         lastError: formatError(error),
-      });
+      }, state.accountKey);
     }
   }
 
   state.running = false;
 
   if (!state.pending) {
-    syncState.delete(jobId);
+    syncState.delete(queueKey);
   }
 }
 
 chrome.cookies.onChanged.addListener(async ({ cookie }) => {
   try {
-    const jobs = Object.values(await getTrackedJobs());
+    if (!cookie?.domain) {
+      return;
+    }
+
+    if (isVisualpingAuthCookie(cookie)) {
+      clearCookieSyncAccountKeyCache();
+      syncState.clear();
+      return;
+    }
+
+    const accountKey = await ensureCookieSyncAccountKeyCache();
+    if (!accountKey) {
+      return;
+    }
+
+    const jobs = Object.values(await getTrackedJobs(accountKey));
     for (const job of jobs) {
       if (cookieMatchesHost(cookie.domain, job.host)) {
-        queueCookieSync(job.jobId);
+        queueCookieSync(accountKey, job.jobId);
       }
     }
   } catch (error) {
