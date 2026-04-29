@@ -19,6 +19,7 @@ const uiState = {
   },
   createWorkspaceId: "",
   createPresetId: "",
+  createPresetTouched: false,
   createInterval: "1440",
   createAlertCondition: "",
   lastAppliedPresetId: "",
@@ -36,6 +37,8 @@ const uiState = {
     errorCode: "",
   },
 };
+
+const DEFAULT_CREATE_INTERVAL = "1440";
 
 let jobsRequestId = 0;
 let jobsSearchTimer;
@@ -190,7 +193,7 @@ function renderSavedPresetSelect(state) {
     }) ?? null;
 
   const defaultPreset = defaultPresetForWorkspace ?? presets.find((preset) => preset.isDefault) ?? null;
-  if (!uiState.createPresetId && defaultPreset) {
+  if (!uiState.createPresetTouched && !uiState.createPresetId && defaultPreset) {
     uiState.createPresetId = String(defaultPreset.id);
   }
 
@@ -209,7 +212,15 @@ function renderSavedPresetSelect(state) {
   const optionsHtml = presets
     .map((preset) => {
       const selected = String(preset.id) === String(uiState.createPresetId) ? "selected" : "";
-      return `<option value="${escapeHtml(String(preset.id))}" ${selected}>${escapeHtml(preset.name)}</option>`;
+      const workspaceIds = Array.isArray(preset.workspaceIds) ? preset.workspaceIds : [];
+      const isWorkspaceDefault =
+        Boolean(preset.isDefault) &&
+        (!workspaceIds.length ||
+          !Number.isFinite(selectedWorkspaceId) ||
+          selectedWorkspaceId <= 0 ||
+          workspaceIds.some((id) => Number(id) === selectedWorkspaceId));
+      const label = isWorkspaceDefault ? `${preset.name} (default)` : preset.name;
+      return `<option value="${escapeHtml(String(preset.id))}" ${selected}>${escapeHtml(label)}</option>`;
     })
     .join("");
 
@@ -218,7 +229,7 @@ function renderSavedPresetSelect(state) {
       <label class="form-row-select">
         <span class="form-row-select__label"><span class="form-row-select__icon">⚙️</span> Presets:</span>
         <select id="create-preset">
-          <option value="">${defaultPreset ? `Default: ${escapeHtml(defaultPreset.name)}` : "Select a preset"}</option>
+          <option value="">Select a preset</option>
           ${optionsHtml}
         </select>
       </label>
@@ -634,6 +645,7 @@ async function refreshPopupState() {
   if (!availableWorkspaces.includes(Number(uiState.createWorkspaceId))) {
     const defaultId = state?.preferredWorkspaceId ?? availableWorkspaces[0] ?? "";
     uiState.createWorkspaceId = defaultId ? String(defaultId) : "";
+    uiState.createPresetTouched = false;
   }
 }
 
@@ -1039,18 +1051,24 @@ function bindEvents() {
   document.querySelector("#create-workspace")?.addEventListener("change", (event) => {
     uiState.createWorkspaceId = event.target.value;
     uiState.createPresetId = "";
+    uiState.createPresetTouched = false;
     uiState.lastAppliedPresetId = "";
     renderApp();
   });
 
   document.querySelector("#create-preset")?.addEventListener("change", (event) => {
     uiState.createPresetId = String(event.target?.value ?? "");
+    uiState.createPresetTouched = true;
     uiState.lastAppliedPresetId = "";
+    if (!uiState.createPresetId) {
+      uiState.createAlertCondition = "";
+      uiState.createInterval = DEFAULT_CREATE_INTERVAL;
+    }
     renderApp();
   });
 
   document.querySelector("#interval")?.addEventListener("change", (event) => {
-    uiState.createInterval = String(event.target?.value ?? "1440");
+    uiState.createInterval = String(event.target?.value ?? DEFAULT_CREATE_INTERVAL);
   });
 
   document.querySelector("#monitor-suggestions-enabled")?.addEventListener("change", (event) => {
