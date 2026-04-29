@@ -145,15 +145,9 @@ function renderMonitorSuggestions() {
     })
     .join("");
 
-  const emptyMessage = hasLoaded && !isLoading && !error && !items.length
-    ? `<p class="muted suggestions-card__status">No obvious monitor triggers found on this page.</p>`
-    : "";
-  const loadingMessage = isLoading
-    ? `<p class="muted suggestions-card__status">Scanning this page for monitoring ideas...</p>`
-    : "";
-  const errorMessage = error
-    ? `<p class="muted suggestions-card__status suggestions-card__status--error">${escapeHtml(error)}</p>`
-    : "";
+  const emptyMessage = hasLoaded && !isLoading && !error && !items.length ? `<p class="muted suggestions-card__status">No obvious monitor triggers found on this page.</p>` : "";
+  const loadingMessage = isLoading ? `<p class="muted suggestions-card__status">Scanning this page for monitoring ideas...</p>` : "";
+  const errorMessage = error ? `<p class="muted suggestions-card__status suggestions-card__status--error">${escapeHtml(error)}</p>` : "";
 
   return `
     <section class="suggestions-card suggestions-card--flat">
@@ -175,12 +169,27 @@ function renderSavedPresetSelect(state) {
 
   const presets = Array.isArray(state.savedJobPresets) ? state.savedJobPresets : [];
   if (!presets.length) {
-    return `
-      <div class="preset-picker preset-picker--empty">
-        <span class="preset-picker__label"><span class="preset-picker__icon">📋</span> Saved presets</span>
-        <p class="preset-picker__hint muted">No saved presets returned for this organisation.</p>
-      </div>
-    `;
+    return "";
+  }
+
+  const selectedWorkspaceId = Number(uiState.createWorkspaceId || state.preferredWorkspaceId);
+  const defaultPresetForWorkspace =
+    presets.find((preset) => {
+      if (!preset?.isDefault) {
+        return false;
+      }
+
+      const workspaceIds = Array.isArray(preset.workspaceIds) ? preset.workspaceIds : [];
+      if (!workspaceIds.length || !Number.isFinite(selectedWorkspaceId) || selectedWorkspaceId <= 0) {
+        return true;
+      }
+
+      return workspaceIds.some((id) => Number(id) === selectedWorkspaceId);
+    }) ?? null;
+
+  const defaultPreset = defaultPresetForWorkspace ?? presets.find((preset) => preset.isDefault) ?? null;
+  if (!uiState.createPresetId && defaultPreset) {
+    uiState.createPresetId = String(defaultPreset.id);
   }
 
   const optionsHtml = presets
@@ -193,9 +202,9 @@ function renderSavedPresetSelect(state) {
 
   return `
     <label class="preset-picker">
-      <span class="preset-picker__label"><span class="preset-picker__icon">📋</span> Saved presets (organisation)</span>
+      <span class="preset-picker__label"><span class="preset-picker__icon">📋</span> Presets</span>
       <select id="create-preset" class="preset-picker__select">
-        <option value="">Select a preset</option>
+        <option value="">${defaultPreset ? `Default: ${escapeHtml(defaultPreset.name)}` : "Select a preset"}</option>
         ${optionsHtml}
       </select>
       <p class="preset-picker__hint muted">Shows all presets available to this organisation.</p>
@@ -236,7 +245,7 @@ function renderCreateTab() {
     })
     .join("");
   const workspaceSelect = state.isBusinessUser
-    ? (workspaceOptions
+    ? workspaceOptions
       ? `
         <label class="form-row-select">
           <span class="form-row-select__label"><span class="form-row-select__icon">🧰</span> Workspace:</span>
@@ -248,7 +257,7 @@ function renderCreateTab() {
           <span class="form-row-select__label"><span class="form-row-select__icon">🧰</span> Workspace:</span>
           <select id="create-workspace" disabled><option>Unavailable</option></select>
         </label>
-      `)
+      `
     : "";
   const presetSelect = renderSavedPresetSelect(state);
   const userEmail = String(state.userEmail ?? "").trim();
@@ -315,8 +324,7 @@ function renderJobsList(jobs) {
     .map((job) => {
       const toggleClass = job.cookieSyncEnabled ? "is-on" : "is-off";
       const openingScript = uiState.jobs.openingScriptJobId === job.id;
-      const scriptHint =
-        "If the monitored job needs clicks or actions to end up in the state that you want it to be, use this to add actions";
+      const scriptHint = "If the monitored job needs clicks or actions to end up in the state that you want it to be, use this to add actions";
       const titleText = String(job.description || `Job #${job.id}`).trim();
       const scriptTitle = `Add script action. ${scriptHint}`;
       const cookieTitle = job.cookieSyncEnabled ? "Cookie sync on" : "Cookie sync off";
@@ -409,7 +417,7 @@ function renderJobsTab() {
     </section>
 
     ${renderMessage(uiState.jobsFlash)}
-    ${uiState.jobs.error ? renderMessage({ type: 'error', text: uiState.jobs.error }) : ""}
+    ${uiState.jobs.error ? renderMessage({ type: "error", text: uiState.jobs.error }) : ""}
     ${loadingMessage}
     ${data ? renderJobsList(data.jobs ?? []) : ""}
 
@@ -459,11 +467,7 @@ function renderApp() {
   const createActive = uiState.activeTab === "create";
   const jobsActive = uiState.activeTab === "jobs";
   const settingsActive = uiState.activeTab === "settings";
-  const tabContentClass = createActive
-    ? "tab-content tab-content--create"
-    : jobsActive
-      ? "tab-content tab-content--jobs"
-      : "tab-content tab-content--settings";
+  const tabContentClass = createActive ? "tab-content tab-content--create" : jobsActive ? "tab-content tab-content--jobs" : "tab-content tab-content--settings";
   app.innerHTML = `
     <div class="topbar">
       <div class="topbar__left">
@@ -583,9 +587,7 @@ async function loadMonitorSuggestions({ forceRefresh = false } = {}) {
     return;
   }
 
-  uiState.suggestions.items = Array.isArray(response.suggestions)
-    ? response.suggestions.map((value) => String(value ?? "").trim()).filter(Boolean)
-    : [];
+  uiState.suggestions.items = Array.isArray(response.suggestions) ? response.suggestions.map((value) => String(value ?? "").trim()).filter(Boolean) : [];
   if (!uiState.suggestions.items.includes(uiState.suggestions.selected)) {
     uiState.suggestions.selected = "";
   }
@@ -677,7 +679,7 @@ async function handleCreateJobSubmit(event) {
 
   if (!alertCondition) {
     uiState.createFlash = {
-      type: 'error',
+      type: "error",
       text: '"Alert me when" cannot be empty.',
     };
     renderApp();
@@ -690,8 +692,8 @@ async function handleCreateJobSubmit(event) {
       await ensureTabPermission(tabUrl);
     } catch (error) {
       uiState.createFlash = {
-        type: 'error',
-        text: error instanceof Error ? error.message : 'Site permission required.',
+        type: "error",
+        text: error instanceof Error ? error.message : "Site permission required.",
       };
       renderApp();
       return;
@@ -703,8 +705,7 @@ async function handleCreateJobSubmit(event) {
   submitButton.textContent = "Creating…";
 
   const workspaceIdValue = Number(uiState.createWorkspaceId);
-  const workspaceId =
-    Number.isFinite(workspaceIdValue) && workspaceIdValue > 0 ? workspaceIdValue : undefined;
+  const workspaceId = Number.isFinite(workspaceIdValue) && workspaceIdValue > 0 ? workspaceIdValue : undefined;
 
   const response = await chrome.runtime.sendMessage({
     type: "create-job",
@@ -717,7 +718,7 @@ async function handleCreateJobSubmit(event) {
 
   if (!response?.ok) {
     uiState.createFlash = {
-      type: 'error',
+      type: "error",
       text: response?.error ?? "Job creation failed.",
     };
     renderApp();
@@ -785,14 +786,10 @@ async function handleMonitorSuggestionsToggle(enabled) {
     uiState.settings.monitorSuggestionsEnabled = response.enabled === true;
     uiState.settingsFlash = {
       type: "success",
-      text: uiState.settings.monitorSuggestionsEnabled
-        ? "Monitoring suggestions are enabled."
-        : "Monitoring suggestions are disabled.",
+      text: uiState.settings.monitorSuggestionsEnabled ? "Monitoring suggestions are enabled." : "Monitoring suggestions are disabled.",
     };
 
-    const shouldLoadSuggestionsAfterEnable =
-      uiState.settings.monitorSuggestionsEnabled &&
-      (uiState.activeTab === "create" || uiState.lastMainTab === "create");
+    const shouldLoadSuggestionsAfterEnable = uiState.settings.monitorSuggestionsEnabled && (uiState.activeTab === "create" || uiState.lastMainTab === "create");
 
     if (shouldLoadSuggestionsAfterEnable) {
       await loadMonitorSuggestions({ forceRefresh: true });
@@ -820,12 +817,7 @@ async function handleTabChange(nextTab) {
   uiState.lastMainTab = nextTab;
   renderApp();
 
-  if (
-    nextTab === "create" &&
-    uiState.popupState?.loggedIn &&
-    uiState.popupState?.supportedPage &&
-    uiState.settings.monitorSuggestionsEnabled
-  ) {
+  if (nextTab === "create" && uiState.popupState?.loggedIn && uiState.popupState?.supportedPage && uiState.settings.monitorSuggestionsEnabled) {
     await loadMonitorSuggestions();
   }
 
@@ -837,11 +829,7 @@ async function handleTabChange(nextTab) {
 function handleSettingsToggle() {
   if (uiState.activeTab === "settings") {
     uiState.activeTab = uiState.lastMainTab;
-    if (
-      uiState.activeTab === "create" &&
-      uiState.popupState?.loggedIn &&
-      !uiState.popupState?.supportedPage
-    ) {
+    if (uiState.activeTab === "create" && uiState.popupState?.loggedIn && !uiState.popupState?.supportedPage) {
       uiState.activeTab = "jobs";
       uiState.lastMainTab = "jobs";
     }
@@ -868,7 +856,7 @@ async function handleToggleCookieSync(jobId) {
       await ensureTabPermission(job.url);
     } catch (error) {
       uiState.jobsFlash = {
-        type: 'error',
+        type: "error",
         text: error instanceof Error ? error.message : "Site permission required.",
       };
       renderApp();
@@ -892,7 +880,7 @@ async function handleToggleCookieSync(jobId) {
 
   if (!response?.ok) {
     uiState.jobsFlash = {
-      type: 'error',
+      type: "error",
       text: response?.error ?? "Cookie sync update failed.",
     };
     renderApp();
@@ -901,9 +889,7 @@ async function handleToggleCookieSync(jobId) {
 
   uiState.jobsFlash = {
     type: "success",
-    text: response.enabled
-      ? `Cookie sync enabled for job #${job.id}.`
-      : `Cookie sync disabled for job #${job.id}.`,
+    text: response.enabled ? `Cookie sync enabled for job #${job.id}.` : `Cookie sync disabled for job #${job.id}.`,
   };
 
   await refreshPopupState();
@@ -985,9 +971,7 @@ async function handleOpenScriptAction(jobId) {
     const openError = response?.panelOpenError ?? panelOpenError;
     uiState.jobsFlash = {
       type: "error",
-      text: `Could not open the script generator panel. ${
-        openError instanceof Error ? openError.message : String(openError ?? "Unknown side panel error.")
-      }`,
+      text: `Could not open the script generator panel. ${openError instanceof Error ? openError.message : String(openError ?? "Unknown side panel error.")}`,
     };
     renderApp();
     return;
@@ -1035,6 +1019,8 @@ function bindEvents() {
 
   document.querySelector("#create-workspace")?.addEventListener("change", (event) => {
     uiState.createWorkspaceId = event.target.value;
+    uiState.createPresetId = "";
+    renderApp();
   });
 
   document.querySelector("#create-preset")?.addEventListener("change", (event) => {
@@ -1114,11 +1100,7 @@ async function bootstrap() {
   renderApp();
   focusAlertConditionField();
 
-  if (
-    uiState.popupState?.loggedIn &&
-    uiState.popupState?.supportedPage &&
-    uiState.settings.monitorSuggestionsEnabled
-  ) {
+  if (uiState.popupState?.loggedIn && uiState.popupState?.supportedPage && uiState.settings.monitorSuggestionsEnabled) {
     void loadMonitorSuggestions();
   }
 
