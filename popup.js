@@ -167,17 +167,11 @@ function renderMonitorSuggestions() {
   `;
 }
 
-function renderSavedPresetSelect(state) {
-  if (!state?.isBusinessUser || !(state.workspaces ?? []).length) {
-    return "";
+function resolveDefaultPreset(presets, selectedWorkspaceId) {
+  if (!Array.isArray(presets) || !presets.length) {
+    return null;
   }
 
-  const presets = Array.isArray(state.savedJobPresets) ? state.savedJobPresets : [];
-  if (!presets.length) {
-    return "";
-  }
-
-  const selectedWorkspaceId = Number(uiState.createWorkspaceId || state.preferredWorkspaceId);
   const defaultPresetForWorkspace =
     presets.find((preset) => {
       if (!preset?.isDefault) {
@@ -192,22 +186,68 @@ function renderSavedPresetSelect(state) {
       return workspaceIds.some((id) => Number(id) === selectedWorkspaceId);
     }) ?? null;
 
-  const defaultPreset = defaultPresetForWorkspace ?? presets.find((preset) => preset.isDefault) ?? null;
-  if (!uiState.createPresetTouched && !uiState.createPresetId && defaultPreset) {
-    uiState.createPresetId = String(defaultPreset.id);
+  return defaultPresetForWorkspace ?? presets.find((preset) => preset.isDefault) ?? null;
+}
+
+function applyPresetDerivedFields(state) {
+  const presets = Array.isArray(state?.savedJobPresets) ? state.savedJobPresets : [];
+  const id = uiState.createPresetId;
+  if (!id || !presets.length) {
+    return;
   }
 
-  const selectedPreset = presets.find((preset) => String(preset.id) === String(uiState.createPresetId)) ?? null;
-  const selectedPresetId = selectedPreset ? String(selectedPreset.id) : "";
-  if (selectedPresetId && uiState.lastAppliedPresetId !== selectedPresetId) {
-    if (selectedPreset.importantDefinition) {
-      uiState.createAlertCondition = String(selectedPreset.importantDefinition);
-    }
-    if (selectedPreset.interval) {
-      uiState.createInterval = String(selectedPreset.interval);
-    }
-    uiState.lastAppliedPresetId = selectedPresetId;
+  const selectedPreset = presets.find((preset) => String(preset.id) === String(id));
+  if (!selectedPreset) {
+    return;
   }
+
+  const selectedPresetId = String(selectedPreset.id);
+  if (uiState.lastAppliedPresetId === selectedPresetId) {
+    return;
+  }
+
+  if (selectedPreset.importantDefinition) {
+    uiState.createAlertCondition = String(selectedPreset.importantDefinition);
+  }
+  if (selectedPreset.interval) {
+    uiState.createInterval = String(selectedPreset.interval);
+  }
+  uiState.lastAppliedPresetId = selectedPresetId;
+}
+
+function syncCreatePresetSelection(state) {
+  if (!state?.isBusinessUser || !(state.workspaces ?? []).length) {
+    return;
+  }
+
+  const presets = Array.isArray(state.savedJobPresets) ? state.savedJobPresets : [];
+  if (!presets.length) {
+    return;
+  }
+
+  const selectedWorkspaceId = Number(uiState.createWorkspaceId || state.preferredWorkspaceId);
+
+  if (!uiState.createPresetTouched && !uiState.createPresetId) {
+    const defaultPreset = resolveDefaultPreset(presets, selectedWorkspaceId);
+    if (defaultPreset) {
+      uiState.createPresetId = String(defaultPreset.id);
+    }
+  }
+
+  applyPresetDerivedFields(state);
+}
+
+function renderSavedPresetSelect(state) {
+  if (!state?.isBusinessUser || !(state.workspaces ?? []).length) {
+    return "";
+  }
+
+  const presets = Array.isArray(state.savedJobPresets) ? state.savedJobPresets : [];
+  if (!presets.length) {
+    return "";
+  }
+
+  const selectedWorkspaceId = Number(uiState.createWorkspaceId || state.preferredWorkspaceId);
 
   const optionsHtml = presets
     .map((preset) => {
@@ -647,6 +687,8 @@ async function refreshPopupState() {
     uiState.createWorkspaceId = defaultId ? String(defaultId) : "";
     uiState.createPresetTouched = false;
   }
+
+  syncCreatePresetSelection(state);
 }
 
 async function loadJobsPage() {
@@ -1053,6 +1095,7 @@ function bindEvents() {
     uiState.createPresetId = "";
     uiState.createPresetTouched = false;
     uiState.lastAppliedPresetId = "";
+    syncCreatePresetSelection(uiState.popupState);
     renderApp();
   });
 
@@ -1063,6 +1106,8 @@ function bindEvents() {
     if (!uiState.createPresetId) {
       uiState.createAlertCondition = "";
       uiState.createInterval = DEFAULT_CREATE_INTERVAL;
+    } else {
+      applyPresetDerivedFields(uiState.popupState);
     }
     renderApp();
   });
