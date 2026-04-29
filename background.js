@@ -18,6 +18,8 @@ import {
   cookieMatchesHost,
   createVisualpingJob,
   getVisualpingJob,
+  listSavedJobPresetsForUi,
+  listSavedJobSettings,
   listVisualpingJobs,
   listVisualpingLabels,
   updateVisualpingJob,
@@ -1526,8 +1528,18 @@ async function buildPopupState() {
     clearCookieSyncAccountKeyCache();
   }
   const monitorSuggestionsEnabled = await getMonitorSuggestionsEnabled();
-  const isBusinessUser = getOrganisationId(session) !== null;
+  const organisationId = getOrganisationId(session);
+  const isBusinessUser = organisationId !== null;
   const userEmail = getUserEmail(session);
+  let savedJobPresets = [];
+  if (session.loggedIn && session.token && organisationId) {
+    try {
+      const savedJobSettingsPayload = await listSavedJobSettings(config, session.token, { organisationId });
+      savedJobPresets = listSavedJobPresetsForUi(savedJobSettingsPayload);
+    } catch (error) {
+      console.warn("Could not load saved presets.", error);
+    }
+  }
   const workspaceRecords = (session.user?.workspaces ?? [])
     .map((workspace) => {
       const id = Number(workspace.id);
@@ -1564,6 +1576,7 @@ async function buildPopupState() {
       monitorSuggestionsEnabled,
       isBusinessUser,
       userEmail,
+      savedJobPresets,
       tab: tabSummary,
     };
   }
@@ -1593,6 +1606,7 @@ async function buildPopupState() {
     monitorSuggestionsEnabled,
     isBusinessUser,
     userEmail,
+    savedJobPresets,
   };
 }
 

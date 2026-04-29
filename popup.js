@@ -18,6 +18,7 @@ const uiState = {
     openingScriptJobId: null,
   },
   createWorkspaceId: "",
+  createPresetId: "",
   createAlertCondition: "",
   settings: {
     monitorSuggestionsEnabled: false,
@@ -167,6 +168,41 @@ function renderMonitorSuggestions() {
   `;
 }
 
+function renderSavedPresetSelect(state) {
+  if (!state?.isBusinessUser || !(state.workspaces ?? []).length) {
+    return "";
+  }
+
+  const presets = Array.isArray(state.savedJobPresets) ? state.savedJobPresets : [];
+  if (!presets.length) {
+    return `
+      <div class="preset-picker preset-picker--empty">
+        <span class="preset-picker__label"><span class="preset-picker__icon">📋</span> Saved presets</span>
+        <p class="preset-picker__hint muted">No saved presets returned for this organisation.</p>
+      </div>
+    `;
+  }
+
+  const optionsHtml = presets
+    .map((preset) => {
+      const selected = String(preset.id) === String(uiState.createPresetId) ? "selected" : "";
+      const defaultTag = preset.isDefault ? " (default)" : "";
+      return `<option value="${escapeHtml(String(preset.id))}" ${selected}>${escapeHtml(preset.name)}${escapeHtml(defaultTag)}</option>`;
+    })
+    .join("");
+
+  return `
+    <label class="preset-picker">
+      <span class="preset-picker__label"><span class="preset-picker__icon">📋</span> Saved presets (organisation)</span>
+      <select id="create-preset" class="preset-picker__select">
+        <option value="">Select a preset</option>
+        ${optionsHtml}
+      </select>
+      <p class="preset-picker__hint muted">Shows all presets available to this organisation.</p>
+    </label>
+  `;
+}
+
 function renderCreateTab() {
   const state = uiState.popupState;
   if (!state) {
@@ -214,6 +250,7 @@ function renderCreateTab() {
         </label>
       `)
     : "";
+  const presetSelect = renderSavedPresetSelect(state);
   const userEmail = String(state.userEmail ?? "").trim();
   const identityLabel = userEmail || "Signed in";
 
@@ -235,6 +272,7 @@ function renderCreateTab() {
       </label>
 
       ${workspaceSelect}
+      ${presetSelect}
 
       <button id="submit-button" class="button-primary button-primary--main" type="submit">Start monitoring</button>
     </form>
@@ -997,6 +1035,10 @@ function bindEvents() {
 
   document.querySelector("#create-workspace")?.addEventListener("change", (event) => {
     uiState.createWorkspaceId = event.target.value;
+  });
+
+  document.querySelector("#create-preset")?.addEventListener("change", (event) => {
+    uiState.createPresetId = String(event.target?.value ?? "");
   });
 
   document.querySelector("#monitor-suggestions-enabled")?.addEventListener("change", (event) => {
