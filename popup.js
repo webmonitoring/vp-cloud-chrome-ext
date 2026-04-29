@@ -722,6 +722,8 @@ async function handleCreateJobSubmit(event) {
 
   const workspaceIdValue = Number(uiState.createWorkspaceId);
   const workspaceId = Number.isFinite(workspaceIdValue) && workspaceIdValue > 0 ? workspaceIdValue : undefined;
+  const presetIdValue = Number(uiState.createPresetId);
+  const savedJobSettingsId = Number.isFinite(presetIdValue) && presetIdValue > 0 ? presetIdValue : undefined;
 
   const response = await chrome.runtime.sendMessage({
     type: "create-job",
@@ -729,6 +731,7 @@ async function handleCreateJobSubmit(event) {
       alertCondition,
       interval,
       ...(workspaceId !== undefined ? { workspaceId } : {}),
+      ...(savedJobSettingsId !== undefined ? { savedJobSettingsId } : {}),
     },
   });
 

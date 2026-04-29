@@ -13,13 +13,16 @@ import {
   buildScriptActionPreactions,
   buildCookieSyncPayload,
   buildCreateJobPayload,
+  buildCreateJobFromSavedSettingsPayload,
   buildLoginUrl,
   checkVisualpingSession,
   cookieMatchesHost,
   createVisualpingJob,
+  createVisualpingJobFromSavedSettings,
   getVisualpingJob,
   listSavedJobPresetsForUi,
   listSavedJobSettings,
+  mergeCookieActionsIntoPreactions,
   listVisualpingJobs,
   listVisualpingLabels,
   updateVisualpingJob,
@@ -1610,7 +1613,41 @@ async function buildPopupState() {
   };
 }
 
-async function createJobForActiveTab({ alertCondition, interval, workspaceId: requestedWorkspaceId } = {}) {
+async function applyCreatedJobFollowUps(config, session, { jobId, workspaceId, alertCondition, cookies }) {
+  const payload = {};
+  if (alertCondition?.trim()) {
+    payload.summalyzer = {
+      importantDefinitionType: "custom",
+      importantDefinition: alertCondition.trim(),
+    };
+  }
+
+  if (cookies.length) {
+    const jobDetails = await getVisualpingJob(config, session.token, jobId, {
+      workspaceId: workspaceId ?? undefined,
+    });
+    payload.skipInitialRun = true;
+    payload.enable_cookies_and_ad_blocker = true;
+    payload.preactions = mergeCookieActionsIntoPreactions(jobDetails.preactions, cookies);
+  }
+
+  if (!Object.keys(payload).length) {
+    return;
+  }
+
+  if (workspaceId !== undefined && workspaceId !== null) {
+    payload.workspaceId = workspaceId;
+  }
+
+  await updateVisualpingJob(config, session.token, jobId, payload);
+}
+
+async function createJobForActiveTab({
+  alertCondition,
+  interval,
+  workspaceId: requestedWorkspaceId,
+  savedJobSettingsId: requestedSavedJobSettingsId,
+} = {}) {
   const config = await loadPublicConfig();
   const tab = await getActiveTab();
 
@@ -1633,21 +1670,55 @@ async function createJobForActiveTab({ alertCondition, interval, workspaceId: re
     : Number.isFinite(Number(fallbackWorkspaceId)) && Number(fallbackWorkspaceId) > 0
       ? Number(fallbackWorkspaceId)
       : undefined;
-  const payload = buildCreateJobPayload({
-    url: tab.url,
-    title: tab.title,
-    alertCondition,
-    interval,
-    cookies,
-    workspaceId,
-  });
+  const selectedPresetId = Number(requestedSavedJobSettingsId);
+  const hasSelectedPreset = Number.isInteger(selectedPresetId) && selectedPresetId > 0;
 
-  const response = await createVisualpingJob(config, session.token, payload);
+  let response;
+  let resolvedJobId;
+  if (hasSelectedPreset) {
+    if (!(Number.isFinite(workspaceId) && workspaceId > 0)) {
+      throw new Error("Workspace is required when creating a job from a preset.");
+    }
+
+    const presetPayload = buildCreateJobFromSavedSettingsPayload({
+      url: tab.url,
+      title: tab.title,
+      workspaceId,
+      interval,
+      savedJobSettingsId: selectedPresetId,
+    });
+
+    response = await createVisualpingJobFromSavedSettings(config, session.token, presetPayload);
+    resolvedJobId = response.jobid ?? response.jobId ?? response.id;
+    if (resolvedJobId === undefined || resolvedJobId === null || resolvedJobId === "") {
+      throw new Error("Could not read job id from saved-settings create response.");
+    }
+
+    await applyCreatedJobFollowUps(config, session, {
+      jobId: resolvedJobId,
+      workspaceId,
+      alertCondition,
+      cookies,
+    });
+  } else {
+    const payload = buildCreateJobPayload({
+      url: tab.url,
+      title: tab.title,
+      alertCondition,
+      interval,
+      cookies,
+      workspaceId,
+    });
+
+    response = await createVisualpingJob(config, session.token, payload);
+    resolvedJobId = response.jobid;
+  }
+
   const now = new Date().toISOString();
   const host = getHostname(tab.url);
 
   await upsertTrackedJob({
-    jobId: response.jobid,
+    jobId: resolvedJobId,
     url: tab.url,
     title: tab.title ?? host,
     description: tab.title ?? host,
@@ -1664,7 +1735,7 @@ async function createJobForActiveTab({ alertCondition, interval, workspaceId: re
 
   return {
     ok: true,
-    jobId: response.jobid,
+    jobId: resolvedJobId,
     cookieCount: cookies.length,
   };
 }
