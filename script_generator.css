@@ -160,6 +160,85 @@ button:disabled {
   color: var(--error);
 }
 
+.record-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.record-controls {
+  grid-template-columns: 1fr 1fr;
+}
+
+.button-record {
+  background: linear-gradient(135deg, #c0392b, #e74c3c);
+  color: #fff;
+  border: 0;
+}
+
+.button-record:disabled {
+  opacity: 0.55;
+}
+
+.use-recording-btn {
+  width: 100%;
+}
+
+.recorded-actions-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.recorded-actions-list:empty {
+  display: none;
+}
+
+.action-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid var(--line);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.action-index {
+  flex-shrink: 0;
+  width: 18px;
+  text-align: right;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.action-text {
+  word-break: break-all;
+  color: var(--text);
+}
+
+.action-type-navigate .action-text {
+  color: var(--accent-dark);
+  font-style: italic;
+}
+
+.action-type-setValue .action-index,
+.action-type-setChecked .action-index {
+  color: var(--ok);
+}
+
+.recording-panel.is-recording {
+  border-color: rgba(192, 57, 43, 0.4);
+  background: rgba(255, 240, 238, 0.6);
+}
+
 .thinking-log {
   margin: 0;
   border: 1px solid var(--line-strong);
