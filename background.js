@@ -2187,7 +2187,25 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
   queueMonitorSuggestionsForTab(tabId, "tab-activated", 350);
 });
 
+// Recording state: tabId -> { actions: [], jobId }
+const recordingState = new Map();
+
+async function injectRecorder(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: ["recorder.js"],
+  });
+}
+
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status === "complete" && recordingState.has(tabId)) {
+    const rec = recordingState.get(tabId);
+    if (changeInfo.url) {
+      rec.actions.push({ type: "navigate", url: changeInfo.url, timestamp: Date.now() });
+    }
+    void injectRecorder(tabId).catch(() => {});
+  }
+
   if (!tab?.active) {
     return;
   }
@@ -2228,7 +2246,7 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
   }
 });
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
     if (message?.type === "popup-state") {
       sendResponse(await buildPopupState());
@@ -2345,6 +2363,58 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           error: formatError(error),
         });
       }
+      return;
+    }
+
+    if (message?.type === "start-recording") {
+      const tabId = Number(message.payload?.tabId);
+      if (!Number.isInteger(tabId) || tabId <= 0) {
+        sendResponse({ ok: false, error: "Valid tabId required to start recording." });
+        return;
+      }
+      recordingState.set(tabId, { actions: [], jobId: message.payload?.jobId ?? null });
+      try {
+        await injectRecorder(tabId);
+        sendResponse({ ok: true });
+      } catch (error) {
+        recordingState.delete(tabId);
+        sendResponse({ ok: false, error: formatError(error) });
+      }
+      return;
+    }
+
+    if (message?.type === "stop-recording") {
+      const tabId = Number(message.payload?.tabId);
+      const rec = recordingState.get(tabId);
+      const actions = rec?.actions ?? [];
+      recordingState.delete(tabId);
+      try {
+        await chrome.scripting.executeScript({
+          target: { tabId },
+          func: () => {
+            document.getElementById("__vp-recorder-badge")?.remove();
+            window.__vpRecorderInstalled = false;
+          },
+        });
+      } catch (_error) {}
+      sendResponse({ ok: true, actions });
+      return;
+    }
+
+    if (message?.type === "recording-action") {
+      const tabId = Number(sender.tab?.id);
+      const rec = recordingState.get(tabId);
+      if (rec && message.payload) {
+        rec.actions.push(message.payload);
+      }
+      sendResponse({ ok: true });
+      return;
+    }
+
+    if (message?.type === "get-recording-state") {
+      const tabId = Number(message.payload?.tabId);
+      const rec = recordingState.get(tabId);
+      sendResponse({ ok: true, isRecording: Boolean(rec), actions: rec?.actions ?? [] });
       return;
     }
 

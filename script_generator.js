@@ -6,6 +6,8 @@ const state = {
   isSaving: false,
   stopRequested: false,
   thinkingEntries: [],
+  isRecording: false,
+  recordedActions: [],
 };
 
 const elements = {
@@ -17,6 +19,11 @@ const elements = {
   status: document.querySelector("#status"),
   thinkingLog: document.querySelector("#thinking-log"),
   output: document.querySelector("#generated-script"),
+  startRecordButton: document.querySelector("#start-recording"),
+  stopRecordButton: document.querySelector("#stop-recording"),
+  useRecordingButton: document.querySelector("#use-recording"),
+  recordingStatus: document.querySelector("#recording-status"),
+  recordedActionsList: document.querySelector("#recorded-actions-list"),
 };
 
 const MODEL_OPTIONS = {
@@ -1064,8 +1071,203 @@ async function handleSave() {
   }
 }
 
+function setRecordingStatus(type, message) {
+  elements.recordingStatus.textContent = message;
+  elements.recordingStatus.className = "status";
+  if (type === "success") elements.recordingStatus.classList.add("is-success");
+  else if (type === "warning") elements.recordingStatus.classList.add("is-warning");
+  else if (type === "error") elements.recordingStatus.classList.add("is-error");
+}
+
+function refreshRecordingButtonState() {
+  elements.startRecordButton.disabled = state.isRecording || !state.context;
+  elements.stopRecordButton.disabled = !state.isRecording;
+  elements.startRecordButton.textContent = state.isRecording ? "Recording..." : "Start Recording";
+  elements.useRecordingButton.hidden = state.isRecording || state.recordedActions.length === 0;
+}
+
+function actionLabel(action) {
+  switch (action.type) {
+    case "click":
+      return `Click${action.label ? ` "${action.label}"` : ""}  (${action.selector})`;
+    case "setValue":
+      return `Type "${action.value}"${action.label ? ` into "${action.label}"` : ""}  (${action.selector})`;
+    case "setChecked":
+      return `${action.checked ? "Check" : "Uncheck"}${action.label ? ` "${action.label}"` : ""}  (${action.selector})`;
+    case "navigate":
+      return `Navigate to ${action.url}`;
+    default:
+      return action.type;
+  }
+}
+
+function renderRecordedActions() {
+  const list = elements.recordedActionsList;
+  const actions = state.recordedActions;
+
+  if (actions.length === 0) {
+    list.innerHTML = "";
+    return;
+  }
+
+  list.innerHTML = actions
+    .map(
+      (action, index) =>
+        `<li class="action-item action-type-${action.type}"><span class="action-index">${index + 1}</span><span class="action-text">${actionLabel(action)}</span></li>`,
+    )
+    .join("");
+
+  list.scrollTop = list.scrollHeight;
+}
+
+function convertRecordingToScript(actions) {
+  if (!actions.length) return "";
+
+  const lines = [];
+
+  for (const action of actions) {
+    if (action.type === "navigate") {
+      lines.push(`window.location.href = ${JSON.stringify(action.url)};`);
+      continue;
+    }
+
+    if (action.type === "click") {
+      const comment = action.label ? ` // ${action.label}` : "";
+      lines.push(`document.querySelector(${JSON.stringify(action.selector)})?.click();${comment}`);
+      continue;
+    }
+
+    if (action.type === "setValue") {
+      const sel = JSON.stringify(action.selector);
+      const val = JSON.stringify(action.value);
+      const comment = action.label ? ` // ${action.label}` : "";
+      lines.push(`(function() { var el = document.querySelector(${sel});${comment}`);
+      lines.push(`  if (el) { el.value = ${val}; el.dispatchEvent(new Event('input', {bubbles:true})); el.dispatchEvent(new Event('change', {bubbles:true})); }`);
+      lines.push(`})();`);
+      continue;
+    }
+
+    if (action.type === "setChecked") {
+      const sel = JSON.stringify(action.selector);
+      const comment = action.label ? ` // ${action.label}` : "";
+      lines.push(`(function() { var el = document.querySelector(${sel});${comment}`);
+      lines.push(`  if (el) { el.checked = ${Boolean(action.checked)}; el.dispatchEvent(new Event('change', {bubbles:true})); }`);
+      lines.push(`})();`);
+      continue;
+    }
+  }
+
+  return lines.join("\n");
+}
+
+let recordingPollTimer = null;
+
+async function pollRecordingActions() {
+  if (!state.isRecording) return;
+
+  try {
+    const tabId = await resolveTargetTabId();
+    const response = await chrome.runtime.sendMessage({
+      type: "get-recording-state",
+      payload: { tabId },
+    });
+
+    if (response?.ok) {
+      state.recordedActions = response.actions ?? [];
+      const count = state.recordedActions.length;
+      setRecordingStatus("", `Recording… ${count} action${count === 1 ? "" : "s"} captured`);
+      renderRecordedActions();
+    }
+  } catch (_error) {}
+
+  if (state.isRecording) {
+    recordingPollTimer = window.setTimeout(pollRecordingActions, 600);
+  }
+}
+
+async function handleStartRecording() {
+  if (!state.context) {
+    setRecordingStatus("error", "No job context. Open this from a job row in the popup.");
+    return;
+  }
+
+  try {
+    const tabId = await resolveTargetTabId();
+
+    const response = await chrome.runtime.sendMessage({
+      type: "start-recording",
+      payload: { tabId, jobId: state.context.jobId },
+    });
+
+    if (!response?.ok) throw new Error(response?.error ?? "Could not start recording.");
+
+    state.isRecording = true;
+    state.recordedActions = [];
+    renderRecordedActions();
+    setRecordingStatus("", "Recording… interact with the page");
+    document.querySelector("#recording-panel")?.classList.add("is-recording");
+    refreshRecordingButtonState();
+
+    void pollRecordingActions();
+  } catch (error) {
+    setRecordingStatus("error", error instanceof Error ? error.message : String(error));
+  }
+}
+
+async function handleStopRecording() {
+  state.isRecording = false;
+  clearTimeout(recordingPollTimer);
+  document.querySelector("#recording-panel")?.classList.remove("is-recording");
+
+  try {
+    const tabId = await resolveTargetTabId();
+
+    const response = await chrome.runtime.sendMessage({
+      type: "stop-recording",
+      payload: { tabId },
+    });
+
+    if (response?.ok) {
+      state.recordedActions = response.actions ?? [];
+    }
+  } catch (_error) {}
+
+  renderRecordedActions();
+
+  const count = state.recordedActions.length;
+  if (count === 0) {
+    setRecordingStatus("warning", "Recording stopped. No actions were captured.");
+  } else {
+    setRecordingStatus("success", `Recording stopped. ${count} action${count === 1 ? "" : "s"} captured.`);
+  }
+
+  refreshRecordingButtonState();
+}
+
+function handleUseRecording() {
+  const script = convertRecordingToScript(state.recordedActions);
+  if (!script) return;
+
+  state.generatedScript = script;
+  elements.output.value = script;
+
+  const actionSummary = state.recordedActions
+    .filter((a) => a.type !== "navigate")
+    .map((a) => actionLabel(a))
+    .slice(0, 5)
+    .join("; ");
+
+  elements.requestInput.value = actionSummary ? `Recorded: ${actionSummary}` : "Recorded actions";
+
+  setStatus("success", "Script converted from recording. Review and save to job.");
+  refreshButtonState();
+
+  elements.output.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
 async function initialize() {
   refreshButtonState();
+  refreshRecordingButtonState();
 
   const locationContext = getContextFromLocation();
   if (locationContext) {
@@ -1080,6 +1282,7 @@ async function initialize() {
     setStatus("", "Enter an action and generate a script.");
     clearThinkingLog();
     refreshButtonState();
+    refreshRecordingButtonState();
     return;
   }
 
@@ -1098,6 +1301,7 @@ async function initialize() {
   setStatus("", "Enter an action and generate a script.");
   clearThinkingLog();
   refreshButtonState();
+  refreshRecordingButtonState();
 }
 
 elements.generateButton.addEventListener("click", () => {
@@ -1110,6 +1314,18 @@ elements.stopButton.addEventListener("click", () => {
 
 elements.saveButton.addEventListener("click", () => {
   void handleSave();
+});
+
+elements.startRecordButton.addEventListener("click", () => {
+  void handleStartRecording();
+});
+
+elements.stopRecordButton.addEventListener("click", () => {
+  void handleStopRecording();
+});
+
+elements.useRecordingButton.addEventListener("click", () => {
+  handleUseRecording();
 });
 
 void initialize();

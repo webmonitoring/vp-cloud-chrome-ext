@@ -14,6 +14,18 @@
         <p id="job-context" class="context">Loading job context...</p>
       </header>
 
+      <section class="panel recording-panel" id="recording-panel">
+        <label class="label">Record Actions</label>
+        <p class="record-hint">Interact with the page while recording — clicks, form inputs, and navigation are captured. Then convert them into a reusable script.</p>
+        <div class="actions record-controls">
+          <button id="start-recording" class="button-record" type="button">Start Recording</button>
+          <button id="stop-recording" class="button-stop" type="button" disabled>Stop Recording</button>
+        </div>
+        <p id="recording-status" class="status"></p>
+        <ol id="recorded-actions-list" class="recorded-actions-list"></ol>
+        <button id="use-recording" class="button-primary use-recording-btn" type="button" hidden>Convert to Script</button>
+      </section>
+
       <section class="panel">
         <label for="action-request" class="label">What should happen on this page?</label>
         <textarea
