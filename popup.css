@@ -796,40 +796,14 @@ label {
 }
 
 .preset-picker {
-  display: flex;
-  flex-direction: column;
+  display: grid;
   gap: 6px;
-  margin: 12px 0 0;
-}
-
-.preset-picker__label {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-weight: 600;
-  font-size: 13px;
-}
-
-.preset-picker__icon {
-  opacity: 0.85;
-}
-
-.preset-picker__select {
-  width: 100%;
-  padding: 8px 10px;
-  border-radius: 8px;
-  border: 1px solid rgba(0, 0, 0, 0.12);
-  font-size: 13px;
-  background: #fff;
+  margin: 0;
 }
 
 .preset-picker__hint {
   margin: 0;
   font-size: 12px;
-}
-
-.preset-picker--empty .preset-picker__hint {
-  margin-top: 4px;
 }
 
 @media (max-width: 520px) {

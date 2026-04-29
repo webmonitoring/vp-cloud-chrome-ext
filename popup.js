@@ -19,7 +19,9 @@ const uiState = {
   },
   createWorkspaceId: "",
   createPresetId: "",
+  createInterval: "1440",
   createAlertCondition: "",
+  lastAppliedPresetId: "",
   settings: {
     monitorSuggestionsEnabled: false,
     savingMonitorSuggestionsEnabled: false,
@@ -192,23 +194,35 @@ function renderSavedPresetSelect(state) {
     uiState.createPresetId = String(defaultPreset.id);
   }
 
+  const selectedPreset = presets.find((preset) => String(preset.id) === String(uiState.createPresetId)) ?? null;
+  const selectedPresetId = selectedPreset ? String(selectedPreset.id) : "";
+  if (selectedPresetId && uiState.lastAppliedPresetId !== selectedPresetId) {
+    if (selectedPreset.importantDefinition) {
+      uiState.createAlertCondition = String(selectedPreset.importantDefinition);
+    }
+    if (selectedPreset.interval) {
+      uiState.createInterval = String(selectedPreset.interval);
+    }
+    uiState.lastAppliedPresetId = selectedPresetId;
+  }
+
   const optionsHtml = presets
     .map((preset) => {
       const selected = String(preset.id) === String(uiState.createPresetId) ? "selected" : "";
-      const defaultTag = preset.isDefault ? " (default)" : "";
-      return `<option value="${escapeHtml(String(preset.id))}" ${selected}>${escapeHtml(preset.name)}${escapeHtml(defaultTag)}</option>`;
+      return `<option value="${escapeHtml(String(preset.id))}" ${selected}>${escapeHtml(preset.name)}</option>`;
     })
     .join("");
 
   return `
-    <label class="preset-picker">
-      <span class="preset-picker__label"><span class="preset-picker__icon">📋</span> Presets</span>
-      <select id="create-preset" class="preset-picker__select">
-        <option value="">${defaultPreset ? `Default: ${escapeHtml(defaultPreset.name)}` : "Select a preset"}</option>
-        ${optionsHtml}
-      </select>
-      <p class="preset-picker__hint muted">Shows all presets available to this organisation.</p>
-    </label>
+    <div class="preset-picker">
+      <label class="form-row-select">
+        <span class="form-row-select__label"><span class="form-row-select__icon">⚙️</span> Presets:</span>
+        <select id="create-preset">
+          <option value="">${defaultPreset ? `Default: ${escapeHtml(defaultPreset.name)}` : "Select a preset"}</option>
+          ${optionsHtml}
+        </select>
+      </label>
+    </div>
   `;
 }
 
@@ -233,7 +247,8 @@ function renderCreateTab() {
 
   const frequencyOptions = state.frequencyOptions
     .map((option) => {
-      const selected = option.value === "1440" ? "selected" : "";
+      const selectedValue = uiState.createInterval || "1440";
+      const selected = option.value === selectedValue ? "selected" : "";
       return `<option value="${escapeHtml(option.value)}" ${selected}>${escapeHtml(option.label)}</option>`;
     })
     .join("");
@@ -676,6 +691,7 @@ async function handleCreateJobSubmit(event) {
   uiState.createAlertCondition = String(rawAlertCondition);
   const alertCondition = String(rawAlertCondition).trim();
   const interval = app.querySelector("#interval")?.value ?? "1440";
+  uiState.createInterval = String(interval);
 
   if (!alertCondition) {
     uiState.createFlash = {
@@ -1020,11 +1036,18 @@ function bindEvents() {
   document.querySelector("#create-workspace")?.addEventListener("change", (event) => {
     uiState.createWorkspaceId = event.target.value;
     uiState.createPresetId = "";
+    uiState.lastAppliedPresetId = "";
     renderApp();
   });
 
   document.querySelector("#create-preset")?.addEventListener("change", (event) => {
     uiState.createPresetId = String(event.target?.value ?? "");
+    uiState.lastAppliedPresetId = "";
+    renderApp();
+  });
+
+  document.querySelector("#interval")?.addEventListener("change", (event) => {
+    uiState.createInterval = String(event.target?.value ?? "1440");
   });
 
   document.querySelector("#monitor-suggestions-enabled")?.addEventListener("change", (event) => {
