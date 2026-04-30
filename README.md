@@ -36,7 +36,9 @@ After a job is created, the background service worker listens to `chrome.cookies
 
 ## How It Works
 
-- The extension loads config from `https://localhost:3000/config.json` first, then falls back to cached config, then finally to production Visualping endpoints.
+- The extension loads config from an environment-specific `config.json` URL based on the selected backend environment in Settings (`local` = `http://localhost:3000/config.json`, `dev` = `https://dev.visualping.io/config.json`, `prod` = `https://visualping.io/config.json`; default is `prod`).
+- Backend environment selection is only shown in unpacked/development installs (`chrome.management.getSelf().installType === "development"`). Non-development installs always use `prod` and do not show this option.
+- Config loading falls back to cached config for the same selected environment, then finally to built-in production endpoints.
 - Login detection reads the Visualping `idToken` cookie and validates it with `GET /describe-user`.
 - Job creation uses the session-backed `jobServiceEndpointV2URL` flow used by Visualping's web app.
 - Cookie sync stores browser cookies in Visualping `preactions.actions[]` as `cookie` actions shaped like:

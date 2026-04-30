@@ -1,4 +1,10 @@
-import { DEFAULT_FREQUENCY_OPTIONS, STATUS, STORAGE_KEYS } from "./lib/constants.js";
+import {
+  BACKEND_CONFIG_URLS,
+  DEFAULT_BACKEND_ENV,
+  DEFAULT_FREQUENCY_OPTIONS,
+  STATUS,
+  STORAGE_KEYS,
+} from "./lib/constants.js";
 import { loadPublicConfig } from "./lib/config.js";
 import {
   getTrackedJob,
@@ -46,6 +52,11 @@ const ACTION_ICON_PATHS = Object.freeze({
   32: "icons/icon-32.png",
   48: "icons/icon-48.png",
 });
+const BACKEND_ENV_OPTIONS = Object.freeze([
+  { value: "local", label: "Local" },
+  { value: "dev", label: "Develop" },
+  { value: "prod", label: "Production" },
+]);
 const MONITOR_SUGGESTIONS_TRIGGER_DELAY_MS = 3000;
 const monitorSuggestionsCache = new Map();
 const monitorSuggestionsPending = new Map();
@@ -125,6 +136,52 @@ function buildScriptGeneratorPanelPath(context) {
   }
 
   return `script_generator.html?${params.toString()}`;
+}
+
+function normalizeBackendEnv(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return BACKEND_CONFIG_URLS[normalized] ? normalized : DEFAULT_BACKEND_ENV;
+}
+
+async function getInstallType() {
+  if (!chrome.management?.getSelf) {
+    return "normal";
+  }
+
+  try {
+    const selfInfo = await chrome.management.getSelf();
+    return String(selfInfo?.installType ?? "normal");
+  } catch (_error) {
+    return "normal";
+  }
+}
+
+async function isDevelopmentInstall() {
+  return (await getInstallType()) === "development";
+}
+
+async function getStoredBackendEnv() {
+  const result = await chrome.storage.local.get(STORAGE_KEYS.backendEnv);
+  return normalizeBackendEnv(result[STORAGE_KEYS.backendEnv]);
+}
+
+async function getEffectiveBackendEnv() {
+  if (!(await isDevelopmentInstall())) {
+    return DEFAULT_BACKEND_ENV;
+  }
+
+  return getStoredBackendEnv();
+}
+
+async function setStoredBackendEnv(backendEnv) {
+  await chrome.storage.local.set({
+    [STORAGE_KEYS.backendEnv]: normalizeBackendEnv(backendEnv),
+  });
+}
+
+async function getPublicConfig({ forceRefresh = false } = {}) {
+  const backendEnv = await getEffectiveBackendEnv();
+  return loadPublicConfig({ backendEnv, forceRefresh });
 }
 
 async function setScriptGeneratorContext(tabId, context) {
@@ -1282,7 +1339,7 @@ async function ensureCookieSyncAccountKeyCache() {
   if (!cookieSyncAccountKeyLoadPromise) {
     const expectedVersion = cookieSyncAccountCacheVersion;
     cookieSyncAccountKeyLoadPromise = (async () => {
-      const config = await loadPublicConfig();
+      const config = await getPublicConfig();
       const session = await checkVisualpingSession(config);
       if (!session.loggedIn || !session.token) {
         if (expectedVersion === cookieSyncAccountCacheVersion) {
@@ -1333,6 +1390,10 @@ function normalizeJobsQuery(payload = {}) {
 }
 
 function trackedJobMatchesFilters(job, query) {
+  if (job?.isActive === false) {
+    return false;
+  }
+
   if (query.labelId !== null && !normalizeLabelIds(job.labelIds).includes(query.labelId)) {
     return false;
   }
@@ -1361,6 +1422,7 @@ function buildJobsApiParams(query, session, pageIndex = query.pageIndex) {
   const params = {
     pageIndex,
     pageSize: query.pageSize,
+    isActiveFilter: true,
     fullTextSearchFilter: query.nameFilter || undefined,
     labelsFilter: query.labelId !== null ? [query.labelId] : undefined,
     showSpiderJobs: false,
@@ -1429,7 +1491,7 @@ function buildTrackedJobListItem(job, labelsById) {
     host: job.host ?? getHostname(job.url),
     description,
     interval: toNumberOrNull(job.interval),
-    isActive: true,
+    isActive: job.isActive !== false,
     mode: job.mode ?? null,
     labelIds,
     labels: mapLabelIdsToLabels(labelIds, labelsById),
@@ -1455,7 +1517,7 @@ function buildJobsListResult(query, jobs, totalJobs, labels) {
 
 async function listJobsForPopup(payload = {}) {
   const query = normalizeJobsQuery(payload);
-  const config = await loadPublicConfig();
+  const config = await getPublicConfig();
   const session = await requireSession(config);
   const accountKey = requireSessionAccountKey(session);
   const trackedJobs = await listTrackedJobs(accountKey);
@@ -1482,46 +1544,64 @@ async function listJobsForPopup(payload = {}) {
   }
 
   if (query.cookieSyncFilter === "all") {
-    const response = await fetchVisualpingJobsPage(config, session, query, query.pageIndex);
-    const jobs = (response.jobs ?? []).map((job) => {
-      return buildApiJobListItem(job, trackedJobsById.get(Number(job.id)), labelsById);
-    });
+    const firstPage = await fetchVisualpingJobsPage(config, session, query, 0);
+    const totalPages = Number(firstPage.totalPages ?? 0);
+    const targetStart = query.pageIndex * query.pageSize;
+    const jobs = [];
+    let totalActiveJobs = 0;
 
-    return buildJobsListResult(query, jobs, Number(response.totalJobs ?? 0), labels);
+    for (let backendPageIndex = 0; backendPageIndex < totalPages; backendPageIndex += 1) {
+      const response = backendPageIndex === 0 ? firstPage : await fetchVisualpingJobsPage(config, session, query, backendPageIndex);
+
+      for (const job of response.jobs ?? []) {
+        if (!job?.isActive) {
+          continue;
+        }
+
+        if (totalActiveJobs >= targetStart && jobs.length < query.pageSize) {
+          jobs.push(buildApiJobListItem(job, trackedJobsById.get(Number(job.id)), labelsById));
+        }
+
+        totalActiveJobs += 1;
+      }
+    }
+
+    return buildJobsListResult(query, jobs, totalActiveJobs, labels);
   }
 
   const firstPage = await fetchVisualpingJobsPage(config, session, query, 0);
-  const trackedMatchCount = trackedJobs.filter((job) => trackedJobMatchesFilters(job, query)).length;
-  const totalJobs = Math.max(Number(firstPage.totalJobs ?? 0) - trackedMatchCount, 0);
+  const totalPages = Number(firstPage.totalPages ?? 0);
   const targetStart = query.pageIndex * query.pageSize;
   const jobs = [];
-  let skippedUnsyncedJobs = 0;
+  let totalUnsyncedActiveJobs = 0;
 
-  for (let backendPageIndex = 0; backendPageIndex < Number(firstPage.totalPages ?? 0); backendPageIndex += 1) {
+  for (let backendPageIndex = 0; backendPageIndex < totalPages; backendPageIndex += 1) {
     const response = backendPageIndex === 0 ? firstPage : await fetchVisualpingJobsPage(config, session, query, backendPageIndex);
 
     for (const job of response.jobs ?? []) {
+      if (!job?.isActive) {
+        continue;
+      }
+
       if (trackedJobsById.has(Number(job.id))) {
         continue;
       }
 
-      if (skippedUnsyncedJobs < targetStart) {
-        skippedUnsyncedJobs += 1;
-        continue;
+      if (totalUnsyncedActiveJobs >= targetStart && jobs.length < query.pageSize) {
+        jobs.push(buildApiJobListItem(job, null, labelsById));
       }
 
-      jobs.push(buildApiJobListItem(job, null, labelsById));
-      if (jobs.length >= query.pageSize) {
-        return buildJobsListResult(query, jobs, totalJobs, labels);
-      }
+      totalUnsyncedActiveJobs += 1;
     }
   }
 
-  return buildJobsListResult(query, jobs, totalJobs, labels);
+  return buildJobsListResult(query, jobs, totalUnsyncedActiveJobs, labels);
 }
 
 async function buildPopupState() {
-  const config = await loadPublicConfig();
+  const backendEnv = await getEffectiveBackendEnv();
+  const devInstall = await isDevelopmentInstall();
+  const config = await getPublicConfig();
   const tab = await getActiveTab();
   const loginUrl = buildLoginUrl(config);
   const session = await checkVisualpingSession(config);
@@ -1577,6 +1657,9 @@ async function buildPopupState() {
       workspaces: workspaceRecords,
       preferredWorkspaceId,
       monitorSuggestionsEnabled,
+      backendEnv,
+      backendEnvOptions: BACKEND_ENV_OPTIONS,
+      canSelectBackendEnv: devInstall,
       isBusinessUser,
       userEmail,
       savedJobPresets,
@@ -1607,6 +1690,9 @@ async function buildPopupState() {
     workspaces: workspaceRecords,
     preferredWorkspaceId,
     monitorSuggestionsEnabled,
+    backendEnv,
+    backendEnvOptions: BACKEND_ENV_OPTIONS,
+    canSelectBackendEnv: devInstall,
     isBusinessUser,
     userEmail,
     savedJobPresets,
@@ -1648,7 +1734,7 @@ async function createJobForActiveTab({
   workspaceId: requestedWorkspaceId,
   savedJobSettingsId: requestedSavedJobSettingsId,
 } = {}) {
-  const config = await loadPublicConfig();
+  const config = await getPublicConfig();
   const tab = await getActiveTab();
 
   if (!tab || !isSupportedTabUrl(tab.url)) {
@@ -1746,7 +1832,7 @@ async function toggleCookieSyncForJob(payload = {}) {
     throw new Error("A valid Visualping job id is required.");
   }
 
-  const config = await loadPublicConfig();
+  const config = await getPublicConfig();
   const session = await requireSession(config);
   const accountKey = requireSessionAccountKey(session);
   if (payload.enabled === false) {
@@ -1827,7 +1913,7 @@ async function syncCookiesForJob(accountKey, jobId) {
     return;
   }
 
-  const config = await loadPublicConfig();
+  const config = await getPublicConfig();
   const session = await checkVisualpingSession(config);
   if (!session.loggedIn || !session.token) {
     clearCookieSyncAccountKeyCache();
@@ -2066,7 +2152,7 @@ async function saveScriptActionForJob(payload = {}) {
     throw new Error("Generated script is empty.");
   }
 
-  const config = await loadPublicConfig();
+  const config = await getPublicConfig();
   const session = await requireSession(config);
   const workspaceId = getPreferredWorkspaceId(session);
   const jobDetails = await getVisualpingJob(config, session.token, jobId, {
@@ -2272,6 +2358,32 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({
           ok: true,
           enabled,
+        });
+      } catch (error) {
+        sendResponse({
+          ok: false,
+          error: formatError(error),
+        });
+      }
+      return;
+    }
+
+    if (message?.type === "set-backend-env") {
+      try {
+        if (!(await isDevelopmentInstall())) {
+          sendResponse({
+            ok: false,
+            error: "Backend environment selection is only available in development installs.",
+          });
+          return;
+        }
+
+        const requestedEnv = normalizeBackendEnv(message?.payload?.backendEnv);
+        await setStoredBackendEnv(requestedEnv);
+        await getPublicConfig({ forceRefresh: true });
+        sendResponse({
+          ok: true,
+          backendEnv: requestedEnv,
         });
       } catch (error) {
         sendResponse({

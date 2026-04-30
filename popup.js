@@ -26,6 +26,9 @@ const uiState = {
   settings: {
     monitorSuggestionsEnabled: false,
     savingMonitorSuggestionsEnabled: false,
+    backendEnv: "prod",
+    canSelectBackendEnv: false,
+    savingBackendEnv: false,
   },
   suggestions: {
     isLoading: false,
@@ -503,10 +506,34 @@ function renderSettingsTab() {
   }
 
   const disabled = uiState.settings.savingMonitorSuggestionsEnabled ? "disabled" : "";
+  const backendEnvDisabled = uiState.settings.savingBackendEnv ? "disabled" : "";
+  const backendEnvOptions = (uiState.popupState.backendEnvOptions ?? [])
+    .map((option) => {
+      const value = String(option?.value ?? "").trim();
+      const label = String(option?.label ?? value).trim() || value;
+      if (!value) {
+        return "";
+      }
+      const selected = value === uiState.settings.backendEnv ? "selected" : "";
+      return `<option value="${escapeHtml(value)}" ${selected}>${escapeHtml(label)}</option>`;
+    })
+    .join("");
+  const backendEnvSection = uiState.settings.canSelectBackendEnv
+    ? `
+      <label>
+        Backend Environment
+        <select id="backend-env-select" ${backendEnvDisabled}>
+          ${backendEnvOptions}
+        </select>
+      </label>
+      <p class="muted settings-card__hint">Use this only for extension development. Production installs always use Production backend.</p>
+    `
+    : "";
 
   return `
     <section class="filter-card settings-card">
       <p class="filter-card__label">Settings</p>
+      ${backendEnvSection}
       <label class="settings-toggle">
         <input
           id="monitor-suggestions-enabled"
@@ -667,6 +694,8 @@ async function refreshPopupState() {
   const state = await chrome.runtime.sendMessage({ type: "popup-state" });
   uiState.popupState = state;
   uiState.settings.monitorSuggestionsEnabled = Boolean(state?.monitorSuggestionsEnabled);
+  uiState.settings.backendEnv = String(state?.backendEnv ?? "prod");
+  uiState.settings.canSelectBackendEnv = state?.canSelectBackendEnv === true;
   const nextTabUrl = state?.tab?.url ?? "";
 
   if (!state?.supportedPage && state?.loggedIn && uiState.activeTab === "create") {
@@ -689,6 +718,48 @@ async function refreshPopupState() {
   }
 
   syncCreatePresetSelection(state);
+}
+
+async function handleBackendEnvChange(backendEnv) {
+  uiState.settings.savingBackendEnv = true;
+  uiState.settingsFlash = null;
+  renderApp();
+
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: "set-backend-env",
+      payload: {
+        backendEnv,
+      },
+    });
+
+    if (!response?.ok) {
+      uiState.settingsFlash = {
+        type: "error",
+        text: response?.error ?? "Could not change backend environment.",
+      };
+      await refreshPopupState();
+      renderApp();
+      return;
+    }
+
+    await refreshPopupState();
+    uiState.settingsFlash = {
+      type: "success",
+      text: `Backend environment set to ${uiState.settings.backendEnv}.`,
+    };
+    renderApp();
+  } catch (error) {
+    uiState.settingsFlash = {
+      type: "error",
+      text: error instanceof Error ? error.message : String(error),
+    };
+    await refreshPopupState();
+    renderApp();
+  } finally {
+    uiState.settings.savingBackendEnv = false;
+    renderApp();
+  }
 }
 
 async function loadJobsPage() {
@@ -1118,6 +1189,10 @@ function bindEvents() {
 
   document.querySelector("#monitor-suggestions-enabled")?.addEventListener("change", (event) => {
     void handleMonitorSuggestionsToggle(event.target.checked);
+  });
+
+  document.querySelector("#backend-env-select")?.addEventListener("change", (event) => {
+    void handleBackendEnvChange(event.target.value);
   });
 
   document.querySelectorAll("[data-monitor-suggestion]").forEach((button) => {

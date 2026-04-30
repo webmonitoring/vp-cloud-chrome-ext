@@ -12,6 +12,7 @@
   "permissions": [
     "activeTab",
     "cookies",
+    "management",
     "storage",
     "tabs",
     "scripting",
