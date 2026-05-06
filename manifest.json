@@ -13,8 +13,10 @@
     "activeTab",
     "cookies",
     "management",
+    "offscreen",
     "storage",
     "tabs",
+    "debugger",
     "scripting",
     "sidePanel"
   ],
@@ -22,6 +24,9 @@
     "https://visualping.io/*",
     "https://*.visualping.io/*",
     "https://*.api.visualping.io/*",
+    "https://huggingface.co/*",
+    "https://*.huggingface.co/*",
+    "https://*.hf.co/*",
     "https://localhost:3000/*",
     "http://localhost:3000/*",
     "https://127.0.0.1/*",
@@ -34,6 +39,9 @@
   "background": {
     "service_worker": "background.js",
     "type": "module"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   },
   "side_panel": {
     "default_path": "script_generator.html"

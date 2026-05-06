@@ -1,0 +1,28 @@
+{
+  "name": "vp-cloud-chrome-ext",
+  "version": "1.0.0",
+  "description": "A Chrome extension that helps create and manage Visualping Cloud monitoring jobs directly from the page you are viewing.",
+  "main": "background.js",
+  "directories": {
+    "lib": "lib"
+  },
+  "scripts": {
+    "build:gemma": "esbuild lib/gemma/engine-source.js --bundle --format=esm --target=chrome120 --outfile=lib/gemma/engine.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/webmonitoring/vp-cloud-chrome-ext.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/webmonitoring/vp-cloud-chrome-ext/issues"
+  },
+  "homepage": "https://github.com/webmonitoring/vp-cloud-chrome-ext#readme",
+  "devDependencies": {
+    "@huggingface/transformers": "^4.2.0",
+    "esbuild": "^0.28.0"
+  }
+}

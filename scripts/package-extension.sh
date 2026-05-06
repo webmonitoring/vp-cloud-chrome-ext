@@ -14,10 +14,12 @@ rm -f "$ZIP_PATH"
 zip -r "$ZIP_PATH" \
   manifest.json \
   background.js \
+  offscreen.html offscreen.js \
   popup.html popup.js popup.css \
   script_generator.html script_generator.js script_generator.css \
   recorder.js \
   icons \
-  lib
+  lib \
+  -x "lib/gemma/engine-source.js"
 
 echo "Created ${ZIP_PATH}"

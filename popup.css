@@ -159,6 +159,58 @@ body {
   background: var(--neutral-400);
 }
 
+.gemma-model {
+  display: grid;
+  gap: 7px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--neutral-400);
+  background: var(--neutral-200);
+}
+
+.gemma-model__header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.gemma-model__title {
+  overflow: hidden;
+  color: var(--neutral-900);
+  font-size: 12px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gemma-model__status {
+  color: var(--neutral-800);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.gemma-model__button {
+  min-height: 24px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.gemma-model__track {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--neutral-400);
+}
+
+.gemma-model__bar {
+  height: 100%;
+  min-width: 2px;
+  border-radius: inherit;
+  background: var(--teal-500);
+  transition: width 160ms ease;
+}
+
 .page-card,
 .jobs-card,
 .filter-card,

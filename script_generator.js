@@ -26,10 +26,24 @@ const elements = {
   recordedActionsList: document.querySelector("#recorded-actions-list"),
 };
 
-const MODEL_OPTIONS = {
-  expectedInputs: [{ type: "text", languages: ["en"] }],
-  expectedOutputs: [{ type: "text", languages: ["en"] }],
-};
+const EXECUTE_SCRIPT_TOOL = Object.freeze({
+  type: "function",
+  function: {
+    name: "executeScript",
+    description:
+      "Run JavaScript on the live browser page and return its result or error.",
+    parameters: {
+      type: "object",
+      properties: {
+        script: {
+          type: "string",
+          description: "JavaScript source to execute in the page context.",
+        },
+      },
+      required: ["script"],
+    },
+  },
+});
 
 function setStatus(type, message) {
   elements.status.textContent = message;
@@ -70,6 +84,10 @@ function appendThinking(message) {
 function truncateForThinking(text, maxLength = 260) {
   const value = String(text ?? "");
   return value.length > maxLength ? `${value.slice(0, maxLength)}...` : value;
+}
+
+function logLlmInteraction(label, detail) {
+  console.log(`[script-generator][llm] ${label}`, detail);
 }
 
 function refreshButtonState() {
@@ -208,6 +226,111 @@ function parseJsonCandidates(rawText) {
   throw lastError ?? new Error("Model response did not include parseable JSON.");
 }
 
+function extractGemmaToolCalls(text) {
+  const value = String(text ?? "");
+  const calls = [];
+  let searchFrom = 0;
+
+  while (searchFrom < value.length) {
+    const start = value.indexOf("<|tool_call>", searchFrom);
+    if (start === -1) {
+      break;
+    }
+
+    const end = value.indexOf("<tool_call|>", start);
+    if (end === -1) {
+      break;
+    }
+
+    const body = value.slice(start + "<|tool_call>".length, end).trim();
+    const callMatch = body.match(/^call:([A-Za-z_$][\w$]*)\s*\{/);
+    if (callMatch) {
+      const argsStart = body.indexOf("{", callMatch[0].length - 1);
+      const argsEnd = body.lastIndexOf("}");
+      calls.push({
+        id: `tool-call-${calls.length + 1}`,
+        name: callMatch[1],
+        argumentsText: argsStart !== -1 && argsEnd > argsStart
+          ? body.slice(argsStart + 1, argsEnd)
+          : "",
+        raw: body,
+      });
+    }
+
+    searchFrom = end + "<tool_call|>".length;
+  }
+
+  return calls;
+}
+
+function stripGemmaToolCalls(text) {
+  return String(text ?? "")
+    .replace(/<\|tool_call\>[\s\S]*?<tool_call\|>/g, "")
+    .replace(/<\|tool_response\>[\s\S]*?<tool_response\|>/g, "")
+    .trim();
+}
+
+function parseToolArguments(argumentsText) {
+  const text = String(argumentsText ?? "").trim();
+  const candidates = [
+    text,
+    `{${text}}`,
+    text.replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, "$1\"$2\":"),
+    `{${text.replace(/([{,]?\s*)([A-Za-z_$][\w$]*)\s*:/g, "$1\"$2\":")}}`,
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (parsed && typeof parsed === "object") {
+        return parsed;
+      }
+    } catch (_error) {
+      // Keep trying less strict native Gemma formats below.
+    }
+  }
+
+  // Gemma chat templates may emit values like: script:<|"|>...<|"|>
+  const marker = '<|"|>';
+  const scriptKeyIndex = text.search(/(?:^|[,{]\s*)"?script"?\s*:/);
+  if (scriptKeyIndex !== -1) {
+    const firstMarker = text.indexOf(marker, scriptKeyIndex);
+    if (firstMarker !== -1) {
+      const secondMarker = text.indexOf(marker, firstMarker + marker.length);
+      if (secondMarker !== -1) {
+        return {
+          script: text.slice(firstMarker + marker.length, secondMarker),
+        };
+      }
+    }
+  }
+
+  // Fallback for relaxed format: script:"..."
+  const quotedMatch = text.match(/(?:^|[,{]\s*)"?script"?\s*:\s*"([\s\S]*?)"\s*(?:,|$)/);
+  if (quotedMatch?.[1]) {
+    return {
+      script: quotedMatch[1]
+        .replace(/\\"/g, "\"")
+        .replace(/\\n/g, "\n")
+        .replace(/\\t/g, "\t"),
+    };
+  }
+
+  logLlmInteraction("tool args parse failed", { argumentsText: text });
+  return {};
+}
+
+function normalizeToolCallForMessage(toolCall, toolCallId) {
+  return {
+    id: toolCallId,
+    type: "function",
+    function: {
+      name: toolCall.name,
+      arguments: parseToolArguments(toolCall.argumentsText),
+    },
+  };
+}
+
 async function extractJsonObject(text, session) {
   try {
     return parseJsonCandidates(text);
@@ -227,47 +350,24 @@ async function extractJsonObject(text, session) {
   }
 }
 
-function buildGenerationPrompt(actionRequest, domSnapshot, previousFailure = "") {
+function buildGenerationPrompt(actionRequest, previousFailure = "") {
   const retryContext = previousFailure
-    ? `Previous attempt failed: ${previousFailure}\nProduce corrected script, steps, and validationCheck.`
+    ? `Previous attempt failed: ${previousFailure}`
     : "";
 
   return [
-    "You generate JavaScript snippets for Visualping Script actions.",
-    "Use the live DOM snapshot to choose stable selectors.",
-    "Return JSON only with keys: script, steps, validationCheck, validationDescription.",
-    "Requirements:",
-    "- script must be plain JavaScript, no markdown fences.",
-    "- script must execute immediately when run (not only define a function).",
-    "- do not return only a function declaration or function expression.",
-    "- if helper functions are defined, invoke them in the script.",
-    "- include error handling and console confirmation logs.",
-    "- steps is an array that mirrors the script with structured actions for CSP-safe verification.",
-    "- Each step must be one of:",
-    "  {\"type\":\"click\",\"selector\":\"...\"}",
-    "  {\"type\":\"setValue\",\"selector\":\"...\",\"value\":\"...\",\"events\":[\"input\",\"change\"],\"fallbackSelectors\":[\"...\"]}",
-    "  {\"type\":\"setChecked\",\"selector\":\"...\",\"checked\":true,\"events\":[\"change\"],\"fallbackSelectors\":[\"...\"]}",
-    "  {\"type\":\"dispatch\",\"selector\":\"...\",\"event\":\"change\"}",
-    "- Any step may include fallbackSelectors (array of alternate selectors).",
-    "- validationCheck must be one of:",
-    "  {\"type\":\"exists\",\"selector\":\"...\"}",
-    "  {\"type\":\"valueEquals\",\"selector\":\"...\",\"expected\":\"...\"}",
-    "  {\"type\":\"checked\",\"selector\":\"...\",\"expected\":true}",
-    "  {\"type\":\"textIncludes\",\"selector\":\"...\",\"expected\":\"...\"}",
-    "  {\"type\":\"classContains\",\"selector\":\"...\",\"expected\":\"...\"}",
-    "  {\"type\":\"urlIncludes\",\"expected\":\"...\"}",
-    "  {\"type\":\"titleIncludes\",\"expected\":\"...\"}",
-    "- validationCheck must evaluate true when the action worked.",
-    "- use click() for buttons/links/labels/radios.",
-    "- use value + input/change events for text/select inputs.",
-    "- prefer id, name, value, or data-* selectors over brittle class-only selectors.",
-    "- If prior selectors failed, choose selectors from the provided live DOM snapshot candidates/selects/inputs.",
+    "Use executeScript if needed.",
+    "Return strict JSON only: {\"success\":boolean,\"message\":string,\"script\":string}.",
+    "Generate runnable JavaScript, execute it with executeScript, and verify it works before returning.",
+    "Verify by investigating the live DOM with executeScript after running the action.",
+    "Set success=true only if DOM investigation via executeScript confirms the requested action worked.",
+    "If verification fails, set success=false and explain why in message.",
+    "script should refresh at the end to restore page state.",
     retryContext,
-    `User action request: ${actionRequest}`,
-    `Live DOM snapshot JSON: ${JSON.stringify(domSnapshot)}`,
+    `Request: ${actionRequest}`,
   ]
     .filter(Boolean)
-    .join("\n\n");
+    .join("\n");
 }
 
 function ensureExecutableScript(script) {
@@ -666,7 +766,13 @@ async function executeStructuredStepsInTab(tabId, steps) {
           }
 
           if (type === "dispatch") {
-            element.dispatchEvent(new Event(String(step.event ?? "change"), { bubbles: true }));
+            const eventName = String(step.event ?? "change");
+            if (selector === "window" && eventName === "reload") {
+              window.location.reload();
+              appliedSteps += 1;
+              continue;
+            }
+            element.dispatchEvent(new Event(eventName, { bubbles: true }));
             appliedSteps += 1;
             continue;
           }
@@ -698,6 +804,107 @@ async function executeStructuredStepsInTab(tabId, steps) {
   });
 
   return executed?.[0]?.result ?? { ok: false, error: "Step execution did not return a result." };
+}
+
+async function executeScriptToolInTab(tabId, args) {
+  const script = String(args?.script ?? "").trim();
+  if (!script) {
+    return {
+      ok: false,
+      error: "executeScript requires script.",
+    };
+  }
+
+  logLlmInteraction("executeScript request", {
+    tabId,
+    script,
+  });
+
+  const target = { tabId };
+  const protocolVersion = "1.3";
+
+  function attach() {
+    return new Promise((resolve, reject) => {
+      chrome.debugger.attach(target, protocolVersion, () => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        resolve();
+      });
+    });
+  }
+
+  function detach() {
+    return new Promise((resolve) => {
+      chrome.debugger.detach(target, () => {
+        resolve();
+      });
+    });
+  }
+
+  function sendCommand(method, params = {}) {
+    return new Promise((resolve, reject) => {
+      chrome.debugger.sendCommand(target, method, params, (result) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        resolve(result ?? {});
+      });
+    });
+  }
+
+  const expression = `(async () => {\n${script}\n})()`;
+
+  let attached = false;
+  try {
+    await attach();
+    attached = true;
+    const cdpResult = await sendCommand("Runtime.evaluate", {
+      expression,
+      returnByValue: true,
+      awaitPromise: true,
+      userGesture: true,
+    });
+
+    if (cdpResult?.exceptionDetails) {
+      const details = cdpResult.exceptionDetails;
+      const exceptionText = details?.exception?.description
+        || details?.exception?.value
+        || details?.text
+        || "CDP Runtime.evaluate failed.";
+      return {
+        ok: false,
+        error: String(exceptionText),
+        line: Number(details?.lineNumber ?? -1) + 1,
+        column: Number(details?.columnNumber ?? -1) + 1,
+      };
+    }
+
+    const resultPayload = cdpResult?.result;
+    const result = {
+      ok: true,
+      result: {
+        type: resultPayload?.type ?? typeof resultPayload?.value,
+        value: resultPayload?.value,
+        description: resultPayload?.description ?? "",
+      },
+    };
+    logLlmInteraction("executeScript result", result);
+    return result;
+  } catch (error) {
+    const failed = {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+    logLlmInteraction("executeScript result", failed);
+    return failed;
+  } finally {
+    if (attached) {
+      await detach();
+    }
+  }
 }
 
 async function validateStructuredCheck(tabId, validationCheck) {
@@ -764,33 +971,39 @@ async function validateStructuredCheck(tabId, validationCheck) {
 }
 
 async function createModelSession() {
-  if (!("LanguageModel" in globalThis)) {
-    throw new Error("Prompt API is unavailable in this Chrome build. Enable the Prompt API and reload the extension.");
-  }
+  return {
+    async prompt(prompt, options = {}) {
+      const payload = {
+        prompt: Array.isArray(prompt) ? "" : prompt,
+        messages: Array.isArray(prompt) ? prompt : options.messages,
+        maxNewTokens: options.maxNewTokens ?? 1024,
+        tools: options.tools,
+        systemPrompt:
+          options.systemPrompt ??
+          "You write robust JavaScript snippets for Visualping script actions based on live DOM data and return strict JSON with success, message, script.",
+      };
 
-  const availability = await LanguageModel.availability(MODEL_OPTIONS);
-  if (availability === "unavailable") {
-    throw new Error("Chrome's local model is unavailable on this device/profile.");
-  }
+      logLlmInteraction("request", payload);
 
-  const session = await LanguageModel.create({
-    ...MODEL_OPTIONS,
-    monitor(monitor) {
-      monitor.addEventListener("downloadprogress", (event) => {
-        const percent = Math.round(Number(event.loaded ?? 0) * 100);
-        setStatus("", `Downloading model: ${percent}%`);
+      const response = await chrome.runtime.sendMessage({
+        type: "gemma-generate-text",
+        payload,
       });
-    },
-    initialPrompts: [
-      {
-        role: "system",
-        content:
-          "You write robust JavaScript snippets for Visualping script actions based on live DOM data and return strict JSON with script, steps, validationCheck, validationDescription.",
-      },
-    ],
-  });
 
-  return session;
+      if (!response?.ok) {
+        logLlmInteraction("error response", response);
+        throw new Error(response?.error ?? "Gemma 4 generation failed.");
+      }
+
+      const text = String(response.text ?? "");
+      logLlmInteraction("response", {
+        text,
+        state: response.state,
+      });
+      return text;
+    },
+    destroy() {},
+  };
 }
 
 async function resolveTargetTabId() {
@@ -813,163 +1026,150 @@ async function resolveTargetTabId() {
   throw new Error("Could not determine the target tab for script generation.");
 }
 
-async function generateScriptWithValidation(actionRequest, tabId) {
-  let previousFailure = "";
-  let bestCandidate = null;
-  let loopCount = 0;
+async function promptModelWithExecuteScriptTool(session, tabId, prompt) {
+  const messages = [
+    {
+      role: "system",
+      content:
+        "Use executeScript to inspect and verify behavior in the live DOM to make sure script succeeds and modifies DOM as needed. Return strict JSON only: {\"success\":boolean,\"message\":string,\"script\":string}. Set success=true only after DOM-based verification.",
+    },
+    {
+      role: "user",
+      content: prompt,
+    },
+  ];
 
-  function buildStoppedResult() {
-    return {
-      script: bestCandidate?.script ?? "",
-      steps: bestCandidate?.steps ?? [],
-      validationCheck: bestCandidate?.validationCheck ?? null,
-      validationDescription: bestCandidate?.validationDescription ?? "",
-      verified: false,
-      stopped: true,
-      warning: previousFailure || "Generation stopped by user.",
-      loopCount,
-    };
+  // Single generation pass, but multi-step tool handshake so the model can finish its own tool flow.
+  for (let handshake = 0; handshake < 8; handshake += 1) {
+    logLlmInteraction("tool prompt", {
+      handshake: handshake + 1,
+      messages,
+      tools: [EXECUTE_SCRIPT_TOOL],
+    });
+    const modelResponse = await session.prompt(messages, {
+      tools: [EXECUTE_SCRIPT_TOOL],
+      maxNewTokens: 1536,
+    });
+    const toolCalls = extractGemmaToolCalls(modelResponse);
+    logLlmInteraction("tool response", {
+      handshake: handshake + 1,
+      modelResponse,
+      toolCalls,
+    });
+
+    if (!toolCalls.length) {
+      return stripGemmaToolCalls(modelResponse);
+    }
+
+    appendThinking(`LLM requested ${toolCalls.length} executeScript call${toolCalls.length === 1 ? "" : "s"}.`);
+    const normalizedToolCalls = [];
+    messages.push({
+      role: "assistant",
+      content: stripGemmaToolCalls(modelResponse),
+      tool_calls: normalizedToolCalls,
+    });
+
+    for (let index = 0; index < toolCalls.length; index += 1) {
+      const toolCall = toolCalls[index];
+      const toolCallId = toolCall.id;
+      const normalizedToolCall = normalizeToolCallForMessage(toolCall, toolCallId);
+      normalizedToolCalls.push(normalizedToolCall);
+
+      if (toolCall.name !== "executeScript") {
+        messages.push({
+          role: "tool",
+          tool_call_id: toolCallId,
+          content: JSON.stringify({
+            ok: false,
+            error: `Unsupported tool: ${toolCall.name}. Only executeScript is available.`,
+          }),
+        });
+        continue;
+      }
+
+      const toolArgs = normalizedToolCall.function.arguments;
+      appendThinking(`Tool ${index + 1}/${toolCalls.length} executeScript started.`);
+      appendThinking(`executeScript input: ${truncateForThinking(String(toolArgs?.script ?? ""), 180)}`);
+      const result = await executeScriptToolInTab(tabId, toolArgs);
+      if (result?.ok) {
+        appendThinking(`Tool ${index + 1}/${toolCalls.length} executeScript succeeded.`);
+      } else {
+        appendThinking(`Tool ${index + 1}/${toolCalls.length} executeScript failed: ${truncateForThinking(String(result?.error ?? "Unknown error"), 220)}`);
+      }
+      appendThinking(`executeScript output: ${truncateForThinking(JSON.stringify(result), 220)}`);
+      messages.push({
+        role: "tool",
+        tool_call_id: toolCallId,
+        content: JSON.stringify(result),
+      });
+    }
   }
 
-  while (true) {
-    if (state.stopRequested) {
-      appendThinking("Stop requested. Ending generation loop.");
-      return buildStoppedResult();
-    }
+  throw new Error("Model exceeded executeScript handshake limit before returning final JSON.");
+}
 
-    loopCount += 1;
-    setStatus("", "Thinking... inspecting live page DOM.");
-    appendThinking(`Loop ${loopCount}: inspecting live DOM.`);
-    const domSnapshot = await inspectDom(tabId, actionRequest);
-    if (!domSnapshot) {
-      throw new Error("Could not inspect the page DOM. Keep the target tab open and try again.");
-    }
+async function generateScriptWithValidation(actionRequest, tabId) {
+  const session = await createModelSession();
+  try {
+    setStatus("", "Thinking... drafting and testing script.");
+    appendThinking("Prompting local LLM once with executeScript available.");
+    const prompt = buildGenerationPrompt(actionRequest, "");
+    const modelResponse = await promptModelWithExecuteScriptTool(session, tabId, prompt);
 
-    if (state.stopRequested) {
-      appendThinking("Stop requested after DOM inspection.");
-      return buildStoppedResult();
-    }
-
-    const session = await createModelSession();
+    let parsed;
     try {
-      if (previousFailure) {
-        appendThinking(`Previous failure signal: ${truncateForThinking(previousFailure)}`);
-      }
-
-      setStatus("", "Thinking... drafting and repairing script.");
-      appendThinking("Prompting local LLM for the next script candidate.");
-      const prompt = buildGenerationPrompt(actionRequest, domSnapshot, previousFailure);
-      const modelResponse = await session.prompt(prompt);
-
-      if (state.stopRequested) {
-        appendThinking("Stop requested after model response.");
-        return buildStoppedResult();
-      }
-
-      let parsed;
-      try {
-        parsed = await extractJsonObject(modelResponse, session);
-      } catch (error) {
-        previousFailure = `Model returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`;
-        appendThinking(`JSON parse failed. ${truncateForThinking(previousFailure)}`);
-        await sleep(400);
-        continue;
-      }
-      const script = String(parsed.script ?? "").trim();
-      const executableScript = ensureExecutableScript(script);
-      const validationDescription = String(parsed.validationDescription ?? "").trim();
-      const steps = normalizeStructuredSteps(parsed.steps);
-      const validationCheck = normalizeValidationCheck(parsed.validationCheck);
-
-      if (!executableScript) {
-        previousFailure = "Model returned an empty script.";
-        appendThinking(previousFailure);
-        await sleep(400);
-        continue;
-      }
-
-      if (!steps.length) {
-        previousFailure = "Model returned empty structured steps.";
-        appendThinking(previousFailure);
-        await sleep(400);
-        continue;
-      }
-
-      if (!validationCheck) {
-        previousFailure = "Model returned an invalid validation check.";
-        appendThinking(previousFailure);
-        await sleep(400);
-        continue;
-      }
-
-      bestCandidate = {
-        script: executableScript,
-        steps,
-        validationCheck,
-        validationDescription,
+      parsed = await extractJsonObject(modelResponse, session);
+    } catch (error) {
+      const warning = `Model returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`;
+      appendThinking(`JSON parse failed. ${truncateForThinking(warning)}`);
+      return {
+        script: "",
+        steps: [],
+        validationCheck: null,
+        validationDescription: "",
+        verified: false,
+        stopped: false,
+        warning,
+        loopCount: 1,
       };
+    }
 
-      setStatus("", "Thinking... running candidate actions.");
-      appendThinking("Running structured actions in the target tab.");
-      const executionResult = await executeStructuredStepsInTab(tabId, steps);
-      if (!executionResult.ok) {
-        const missingSelectors = Array.isArray(executionResult.missingSelectors)
-          ? executionResult.missingSelectors.filter(Boolean).slice(0, 10)
-          : [];
-        const availableSelectors = Array.isArray(domSnapshot.candidates)
-          ? domSnapshot.candidates
-              .map((candidate) => candidate?.selector)
-              .filter(Boolean)
-              .slice(0, 20)
-          : [];
-        const missingDetails = missingSelectors.length
-          ? ` Missing selectors: ${missingSelectors.join(", ")}.`
-          : "";
-        const availableDetails = availableSelectors.length
-          ? ` Available selectors from page snapshot: ${availableSelectors.join(", ")}.`
-          : "";
-        previousFailure = `Script execution failed: ${executionResult.error}.${missingDetails}${availableDetails}`;
-        appendThinking(`Execution failed. ${truncateForThinking(previousFailure)}`);
-        await sleep(500);
-        continue;
-      }
+    const script = String(parsed.script ?? "").trim();
+    const executableScript = ensureExecutableScript(script);
+    const modelSuccess = Boolean(parsed.success);
+    const modelMessage = String(parsed.message ?? "").trim();
 
-      if (state.stopRequested) {
-        appendThinking("Stop requested after step execution.");
-        return buildStoppedResult();
-      }
-
-      setStatus("", "Thinking... validating resulting page state.");
-      appendThinking("Validating the outcome.");
-      const validationResult = await validateStructuredCheck(tabId, validationCheck);
-      if (!validationResult.ok) {
-        previousFailure = `Validation failed: ${validationResult.error}`;
-        appendThinking(`Validation error. ${truncateForThinking(previousFailure)}`);
-        await sleep(500);
-        continue;
-      }
-
-      if (validationResult.passed) {
-        appendThinking(`Verified successfully on loop ${loopCount}.`);
-        return {
-          ...bestCandidate,
-          verified: true,
-          stopped: false,
-          warning: "",
-          loopCount,
-        };
-      }
-
-      previousFailure = `Validation check returned false. Check: ${JSON.stringify(validationCheck)}. Observed: ${String(validationResult.output ?? "")}`;
-      appendThinking(`Validation not satisfied. ${truncateForThinking(previousFailure)}`);
-      await sleep(500);
-    } finally {
-      if (typeof session.destroy === "function") {
-        try {
-          session.destroy();
-        } catch (_error) {
-          // no-op
-        }
+    if (!executableScript) {
+      const warning = "Model returned an empty script.";
+      appendThinking(warning);
+      return {
+        script: executableScript,
+        steps: [],
+        validationCheck: null,
+        validationDescription: modelMessage,
+        verified: false,
+        stopped: false,
+        warning,
+        loopCount: 1,
+      };
+    }
+    appendThinking(modelSuccess ? "Model reported success." : "Model reported failure.");
+    return {
+      script: executableScript,
+      steps: [],
+      validationCheck: null,
+      validationDescription: modelMessage,
+      verified: modelSuccess,
+      stopped: false,
+      warning: modelSuccess ? "" : (modelMessage || "Model reported unsuccessful result."),
+      loopCount: 1,
+    };
+  } finally {
+    if (typeof session.destroy === "function") {
+      try {
+        session.destroy();
+      } catch (_error) {
+        // no-op
       }
     }
   }
@@ -999,9 +1199,16 @@ async function handleGenerate() {
   try {
     const targetTabId = await resolveTargetTabId();
     const result = await generateScriptWithValidation(actionRequest, targetTabId);
-    if (result.script) {
+    if (result.verified && result.script) {
       state.generatedScript = result.script;
       elements.output.value = result.script;
+    } else {
+      state.generatedScript = "";
+      elements.output.value = "";
+    }
+
+    if (result.validationDescription) {
+      appendThinking(`Final message: ${result.validationDescription}`);
     }
 
     if (result.stopped) {
@@ -1014,12 +1221,11 @@ async function handleGenerate() {
     }
 
     if (result.verified) {
-      const validationMessage = result.validationDescription
-        ? ` Script verified. ${result.validationDescription}`
-        : " Script verified.";
-      setStatus("success", `Script generated.${validationMessage}`);
+      const successMessage = result.validationDescription || "Script generated successfully.";
+      setStatus("success", successMessage);
     } else {
-      setStatus("warning", `Script generated but not verified: ${result.warning}`);
+      const warningMessage = result.validationDescription || result.warning || "Script generation was not successful.";
+      setStatus("warning", warningMessage);
     }
   } catch (error) {
     setStatus("error", error instanceof Error ? error.message : String(error));
