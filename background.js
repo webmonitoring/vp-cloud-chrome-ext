@@ -1,10 +1,15 @@
 import {
   BACKEND_CONFIG_URLS,
+  CLAUDE_MODELS,
   DEFAULT_BACKEND_ENV,
+  DEFAULT_CLAUDE_MODEL,
   DEFAULT_FREQUENCY_OPTIONS,
+  DEFAULT_LLM_BACKEND,
+  LLM_BACKENDS,
   STATUS,
   STORAGE_KEYS,
 } from "./lib/constants.js";
+import { promptClaude } from "./lib/claude/client.js";
 import { loadPublicConfig } from "./lib/config.js";
 import {
   getTrackedJob,
@@ -274,6 +279,17 @@ async function ensureGemmaModelInitialized(reason = "manual") {
 }
 
 async function promptGemmaModel(prompt, options = {}) {
+  const settings = await getLlmSettings();
+  if (settings.backend === "claude") {
+    return promptClaude(prompt, {
+      apiKey: settings.apiKey,
+      model: settings.model,
+      messages: options.messages,
+      systemPrompt: options.systemPrompt,
+      maxNewTokens: options.maxNewTokens ?? 1024,
+      tools: options.tools,
+    });
+  }
   await ensureGemmaModelInitialized("prompt");
   const response = await sendGemmaOffscreenRequest("gemma-generate-text", {
     prompt,
@@ -283,7 +299,6 @@ async function promptGemmaModel(prompt, options = {}) {
     resetCache: true,
     tools: options.tools,
   });
-
   return String(response.text ?? "");
 }
 
@@ -376,6 +391,49 @@ async function getEffectiveBackendEnv() {
 async function setStoredBackendEnv(backendEnv) {
   await chrome.storage.local.set({
     [STORAGE_KEYS.backendEnv]: normalizeBackendEnv(backendEnv),
+  });
+}
+
+function normalizeLlmBackend(value) {
+  return LLM_BACKENDS.includes(value) ? value : DEFAULT_LLM_BACKEND;
+}
+
+function normalizeClaudeModel(value) {
+  const allowed = CLAUDE_MODELS.map((m) => m.id);
+  return allowed.includes(value) ? value : DEFAULT_CLAUDE_MODEL;
+}
+
+async function getLlmSettings() {
+  const result = await chrome.storage.local.get([
+    STORAGE_KEYS.llmBackend,
+    STORAGE_KEYS.claudeApiKey,
+    STORAGE_KEYS.claudeModel,
+  ]);
+  return {
+    backend: normalizeLlmBackend(result[STORAGE_KEYS.llmBackend]),
+    apiKey: String(result[STORAGE_KEYS.claudeApiKey] ?? ""),
+    model: normalizeClaudeModel(result[STORAGE_KEYS.claudeModel]),
+  };
+}
+
+async function setLlmBackend(backend) {
+  await chrome.storage.local.set({
+    [STORAGE_KEYS.llmBackend]: normalizeLlmBackend(backend),
+  });
+}
+
+async function setClaudeApiKey(apiKey) {
+  const trimmed = String(apiKey ?? "").trim();
+  if (trimmed) {
+    await chrome.storage.local.set({ [STORAGE_KEYS.claudeApiKey]: trimmed });
+  } else {
+    await chrome.storage.local.remove(STORAGE_KEYS.claudeApiKey);
+  }
+}
+
+async function setClaudeModel(model) {
+  await chrome.storage.local.set({
+    [STORAGE_KEYS.claudeModel]: normalizeClaudeModel(model),
   });
 }
 
@@ -1772,6 +1830,7 @@ async function buildPopupState() {
     clearCookieSyncAccountKeyCache();
   }
   const monitorSuggestionsEnabled = await getMonitorSuggestionsEnabled();
+  const llmSettings = await getLlmSettings();
   const organisationId = getOrganisationId(session);
   const isBusinessUser = organisationId !== null;
   const userEmail = getUserEmail(session);
@@ -1818,6 +1877,11 @@ async function buildPopupState() {
       workspaces: workspaceRecords,
       preferredWorkspaceId,
       monitorSuggestionsEnabled,
+      llmBackend: llmSettings.backend,
+      llmBackendOptions: LLM_BACKENDS,
+      claudeModel: llmSettings.model,
+      claudeModelOptions: CLAUDE_MODELS,
+      claudeApiKeyPresent: Boolean(llmSettings.apiKey),
       backendEnv,
       backendEnvOptions: BACKEND_ENV_OPTIONS,
       canSelectBackendEnv: devInstall,
@@ -2647,6 +2711,54 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           ok: false,
           error: formatError(error),
         });
+      }
+      return;
+    }
+
+    if (message?.type === "get-llm-settings") {
+      try {
+        const s = await getLlmSettings();
+        sendResponse({
+          ok: true,
+          backend: s.backend,
+          model: s.model,
+          apiKeyPresent: Boolean(s.apiKey),
+        });
+      } catch (error) {
+        sendResponse({ ok: false, error: formatError(error) });
+      }
+      return;
+    }
+
+    if (message?.type === "set-llm-backend") {
+      try {
+        const backend = normalizeLlmBackend(message?.payload?.backend);
+        await setLlmBackend(backend);
+        sendResponse({ ok: true, backend });
+      } catch (error) {
+        sendResponse({ ok: false, error: formatError(error) });
+      }
+      return;
+    }
+
+    if (message?.type === "set-claude-api-key") {
+      try {
+        await setClaudeApiKey(message?.payload?.apiKey);
+        const s = await getLlmSettings();
+        sendResponse({ ok: true, apiKeyPresent: Boolean(s.apiKey) });
+      } catch (error) {
+        sendResponse({ ok: false, error: formatError(error) });
+      }
+      return;
+    }
+
+    if (message?.type === "set-claude-model") {
+      try {
+        const model = normalizeClaudeModel(message?.payload?.model);
+        await setClaudeModel(model);
+        sendResponse({ ok: true, model });
+      } catch (error) {
+        sendResponse({ ok: false, error: formatError(error) });
       }
       return;
     }

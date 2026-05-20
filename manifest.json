@@ -27,6 +27,7 @@
     "https://huggingface.co/*",
     "https://*.huggingface.co/*",
     "https://*.hf.co/*",
+    "https://api.anthropic.com/*",
     "https://localhost:3000/*",
     "http://localhost:3000/*",
     "https://127.0.0.1/*",

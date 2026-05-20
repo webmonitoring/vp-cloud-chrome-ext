@@ -1021,6 +1021,80 @@ async function executeStructuredStepsInTab(tabId, steps) {
   return executed?.[0]?.result ?? { ok: false, error: "Step execution did not return a result." };
 }
 
+async function captureTabScreenshot(tabId) {
+  const target = { tabId };
+  const protocolVersion = "1.3";
+  function attach() {
+    return new Promise((resolve, reject) => {
+      chrome.debugger.attach(target, protocolVersion, () => {
+        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+        else resolve();
+      });
+    });
+  }
+  function detach() {
+    return new Promise((resolve) => {
+      chrome.debugger.detach(target, () => resolve());
+    });
+  }
+  function sendCommand(method, params = {}) {
+    return new Promise((resolve, reject) => {
+      chrome.debugger.sendCommand(target, method, params, (result) => {
+        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+        else resolve(result ?? {});
+      });
+    });
+  }
+  let attached = false;
+  try {
+    await attach();
+    attached = true;
+    const result = await sendCommand("Page.captureScreenshot", { format: "png" });
+    return String(result?.data ?? "");
+  } finally {
+    if (attached) await detach();
+  }
+}
+
+let cachedLlmBackend = null;
+async function getLlmBackendOnce() {
+  if (cachedLlmBackend) return cachedLlmBackend;
+  try {
+    const r = await chrome.runtime.sendMessage({ type: "get-llm-settings" });
+    if (r?.ok) cachedLlmBackend = String(r.backend ?? "local");
+  } catch (_e) {
+    cachedLlmBackend = "local";
+  }
+  return cachedLlmBackend || "local";
+}
+
+// Attach a viewport screenshot to the most recent message in the array.
+// We attach to the LAST message that doesn't already have an image — this
+// is normally the most recent tool response (or the original user message
+// on the first turn). Safe no-op if capture fails.
+async function attachScreenshotToLastMessage(messages, tabId) {
+  if (!Array.isArray(messages) || messages.length === 0) return;
+  let target = null;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (!m) continue;
+    if (m.role === "tool" || m.role === "user") {
+      target = m;
+      break;
+    }
+  }
+  if (!target) return;
+  try {
+    const data = await captureTabScreenshot(tabId);
+    if (data) {
+      target.image = data;
+      appendThinking(`Captured viewport screenshot (${Math.round(data.length / 1024)}KB).`);
+    }
+  } catch (error) {
+    appendThinking(`Screenshot capture failed: ${truncateForThinking(error instanceof Error ? error.message : String(error))}`);
+  }
+}
+
 async function executeScriptToolInTab(tabId, args) {
   const script = String(args?.script ?? "").trim();
   if (!script) {
@@ -1302,8 +1376,12 @@ async function promptModelWithExecuteScriptTool(session, tabId, prompt, actionRe
   const MAX_TOOL_HANDSHAKES = 4;
   let lastSuccessfulActionScript = "";
   let didRunAnyTool = false;
+  const useScreenshots = (await getLlmBackendOnce()) === "claude";
   // Multi-step tool handshake so the model can iterate ACT/VERIFY, then we force REPORT.
   for (let handshake = 0; handshake < MAX_TOOL_HANDSHAKES; handshake += 1) {
+    if (useScreenshots) {
+      await attachScreenshotToLastMessage(messages, tabId);
+    }
     logLlmInteraction("tool prompt", {
       handshake: handshake + 1,
       messages,
@@ -1392,6 +1470,9 @@ async function promptModelWithExecuteScriptTool(session, tabId, prompt, actionRe
       "The script field MUST be a single plain-string of JavaScript source that accomplishes the original request, using the real selectors from the inspection. No nested objects, no tool-call shape.",
     ].join("\n"),
   });
+  if (useScreenshots) {
+    await attachScreenshotToLastMessage(messages, tabId);
+  }
   logLlmInteraction("forced report prompt", { messages });
   const finalResponse = await session.prompt(messages, {
     maxNewTokens: 512,

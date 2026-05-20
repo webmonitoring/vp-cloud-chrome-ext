@@ -29,6 +29,11 @@ const uiState = {
     backendEnv: "prod",
     canSelectBackendEnv: false,
     savingBackendEnv: false,
+    llmBackend: "local",
+    claudeModel: "claude-opus-4-7",
+    claudeApiKeyPresent: false,
+    claudeApiKeyDraft: "",
+    savingLlmSettings: false,
   },
   gemmaModel: {
     status: "idle",
@@ -133,6 +138,9 @@ function getGemmaStatusLabel(status) {
 }
 
 function renderGemmaModelStatus() {
+  if (uiState.settings?.llmBackend === "claude") {
+    return "";
+  }
   const model = uiState.gemmaModel ?? {};
   const status = String(model.status ?? "idle");
   const percentage = Math.max(0, Math.min(100, Math.round(Number(model.percentage ?? 0))));
@@ -623,7 +631,56 @@ function renderSettingsTab() {
     `
     : "";
 
+  const llmDisabled = uiState.settings.savingLlmSettings ? "disabled" : "";
+  const claudeModelOptions = (uiState.settings.claudeModelOptions || [])
+    .map((m) => {
+      const selected = m.id === uiState.settings.claudeModel ? "selected" : "";
+      return `<option value="${escapeHtml(m.id)}" ${selected}>${escapeHtml(m.label)}</option>`;
+    })
+    .join("");
+  const showClaudeSection = uiState.settings.llmBackend === "claude";
+  const apiKeyPlaceholder = uiState.settings.claudeApiKeyPresent
+    ? "•••••••••••• (saved — type to replace)"
+    : "sk-ant-...";
+  const draft = String(uiState.settings.claudeApiKeyDraft ?? "");
+
   return `
+    <section class="filter-card settings-card">
+      <p class="filter-card__label">LLM Backend</p>
+      <label class="form-row-select">
+        <span class="form-row-select__label"><span class="form-row-select__icon">🧠</span> Use:</span>
+        <select id="llm-backend-select" ${llmDisabled}>
+          <option value="local" ${uiState.settings.llmBackend === "local" ? "selected" : ""}>Local Gemma 4 (in-browser)</option>
+          <option value="claude" ${uiState.settings.llmBackend === "claude" ? "selected" : ""}>Claude API (your key)</option>
+        </select>
+      </label>
+      ${showClaudeSection
+        ? `
+        <label>
+          Anthropic API key
+          <input
+            id="claude-api-key-input"
+            type="password"
+            placeholder="${escapeHtml(apiKeyPlaceholder)}"
+            value="${escapeHtml(draft)}"
+            autocomplete="off"
+            spellcheck="false"
+            ${llmDisabled}
+          />
+        </label>
+        <label class="form-row-select">
+          <span class="form-row-select__label"><span class="form-row-select__icon">🤖</span> Model:</span>
+          <select id="claude-model-select" ${llmDisabled}>${claudeModelOptions}</select>
+        </label>
+        <div class="settings-card__actions">
+          <button id="save-claude-settings" class="button-primary" type="button" ${llmDisabled}>Save Claude settings</button>
+          ${uiState.settings.claudeApiKeyPresent ? `<button id="clear-claude-api-key" class="button-ghost" type="button" ${llmDisabled}>Clear saved key</button>` : ""}
+        </div>
+        <p class="muted settings-card__hint">Your API key is stored locally in this browser. The extension calls api.anthropic.com directly with the key in <code>x-api-key</code>.</p>
+      `
+        : `<p class="muted settings-card__hint">Local model runs entirely on this device. Switch to Claude API to use your own Anthropic key for faster, more accurate generation.</p>`}
+    </section>
+
     <section class="filter-card settings-card">
       <p class="filter-card__label">Settings</p>
       ${backendEnvSection}
@@ -790,6 +847,12 @@ async function refreshPopupState() {
   uiState.settings.monitorSuggestionsEnabled = Boolean(state?.monitorSuggestionsEnabled);
   uiState.settings.backendEnv = String(state?.backendEnv ?? "prod");
   uiState.settings.canSelectBackendEnv = state?.canSelectBackendEnv === true;
+  uiState.settings.llmBackend = String(state?.llmBackend ?? "local");
+  uiState.settings.claudeModel = String(state?.claudeModel ?? "claude-opus-4-7");
+  uiState.settings.claudeApiKeyPresent = state?.claudeApiKeyPresent === true;
+  uiState.settings.claudeModelOptions = Array.isArray(state?.claudeModelOptions)
+    ? state.claudeModelOptions
+    : [];
   if (state?.gemmaModel) {
     uiState.gemmaModel = {
       ...uiState.gemmaModel,
@@ -894,6 +957,80 @@ async function handleBackendEnvChange(backendEnv) {
     renderApp();
   } finally {
     uiState.settings.savingBackendEnv = false;
+    renderApp();
+  }
+}
+
+async function handleLlmBackendChange(backend) {
+  uiState.settings.savingLlmSettings = true;
+  uiState.settingsFlash = null;
+  renderApp();
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: "set-llm-backend",
+      payload: { backend },
+    });
+    if (!response?.ok) {
+      uiState.settingsFlash = { type: "error", text: response?.error ?? "Could not switch backend." };
+    } else {
+      uiState.settings.llmBackend = response.backend;
+      uiState.settingsFlash = { type: "success", text: `Backend set to ${response.backend === "claude" ? "Claude API" : "Local Gemma"}.` };
+    }
+    await refreshPopupState();
+  } catch (error) {
+    uiState.settingsFlash = { type: "error", text: error instanceof Error ? error.message : String(error) };
+  } finally {
+    uiState.settings.savingLlmSettings = false;
+    renderApp();
+  }
+}
+
+async function handleSaveClaudeSettings() {
+  uiState.settings.savingLlmSettings = true;
+  uiState.settingsFlash = null;
+  renderApp();
+  try {
+    const draft = String(uiState.settings.claudeApiKeyDraft ?? "").trim();
+    if (draft) {
+      const r = await chrome.runtime.sendMessage({
+        type: "set-claude-api-key",
+        payload: { apiKey: draft },
+      });
+      if (!r?.ok) throw new Error(r?.error ?? "Could not save API key.");
+    }
+    const m = await chrome.runtime.sendMessage({
+      type: "set-claude-model",
+      payload: { model: uiState.settings.claudeModel },
+    });
+    if (!m?.ok) throw new Error(m?.error ?? "Could not save model.");
+    uiState.settings.claudeApiKeyDraft = "";
+    await refreshPopupState();
+    uiState.settingsFlash = { type: "success", text: "Claude settings saved." };
+  } catch (error) {
+    uiState.settingsFlash = { type: "error", text: error instanceof Error ? error.message : String(error) };
+  } finally {
+    uiState.settings.savingLlmSettings = false;
+    renderApp();
+  }
+}
+
+async function handleClearClaudeApiKey() {
+  uiState.settings.savingLlmSettings = true;
+  uiState.settingsFlash = null;
+  renderApp();
+  try {
+    const r = await chrome.runtime.sendMessage({
+      type: "set-claude-api-key",
+      payload: { apiKey: "" },
+    });
+    if (!r?.ok) throw new Error(r?.error ?? "Could not clear API key.");
+    uiState.settings.claudeApiKeyDraft = "";
+    await refreshPopupState();
+    uiState.settingsFlash = { type: "success", text: "Claude API key cleared." };
+  } catch (error) {
+    uiState.settingsFlash = { type: "error", text: error instanceof Error ? error.message : String(error) };
+  } finally {
+    uiState.settings.savingLlmSettings = false;
     renderApp();
   }
 }
@@ -1333,6 +1470,26 @@ function bindEvents() {
 
   document.querySelector("#backend-env-select")?.addEventListener("change", (event) => {
     void handleBackendEnvChange(event.target.value);
+  });
+
+  document.querySelector("#llm-backend-select")?.addEventListener("change", (event) => {
+    void handleLlmBackendChange(event.target.value);
+  });
+
+  document.querySelector("#claude-api-key-input")?.addEventListener("input", (event) => {
+    uiState.settings.claudeApiKeyDraft = String(event.target?.value ?? "");
+  });
+
+  document.querySelector("#claude-model-select")?.addEventListener("change", (event) => {
+    uiState.settings.claudeModel = String(event.target?.value ?? "claude-opus-4-7");
+  });
+
+  document.querySelector("#save-claude-settings")?.addEventListener("click", () => {
+    void handleSaveClaudeSettings();
+  });
+
+  document.querySelector("#clear-claude-api-key")?.addEventListener("click", () => {
+    void handleClearClaudeApiKey();
   });
 
   document.querySelectorAll("[data-monitor-suggestion]").forEach((button) => {
