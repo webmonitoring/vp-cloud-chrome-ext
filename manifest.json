@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Visualping Cloud Jobs",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Help create and manage Visualping Cloud monitoring jobs from the current page and keep their cookie state synced.",
   "icons": {
     "16": "icons/icon-16.png",
@@ -13,8 +13,10 @@
     "activeTab",
     "cookies",
     "management",
+    "offscreen",
     "storage",
     "tabs",
+    "debugger",
     "scripting",
     "sidePanel"
   ],
@@ -22,6 +24,9 @@
     "https://visualping.io/*",
     "https://*.visualping.io/*",
     "https://*.api.visualping.io/*",
+    "https://huggingface.co/*",
+    "https://*.huggingface.co/*",
+    "https://*.hf.co/*",
     "https://localhost:3000/*",
     "http://localhost:3000/*",
     "https://127.0.0.1/*",
@@ -34,6 +39,9 @@
   "background": {
     "service_worker": "background.js",
     "type": "module"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   },
   "side_panel": {
     "default_path": "script_generator.html"

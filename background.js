@@ -39,10 +39,10 @@ const syncState = new Map();
 const VISUALPING_AUTH_COOKIE_NAMES = new Set(["assumedIdToken", "idToken"]);
 const SCRIPT_GENERATOR_CONTEXT_PREFIX = "scriptGeneratorContext:";
 const SCRIPT_GENERATOR_LATEST_CONTEXT_KEY = "scriptGeneratorContextLatest";
-const MONITOR_SUGGESTIONS_MODEL_OPTIONS = {
-  expectedInputs: [{ type: "text", languages: ["en"] }],
-  expectedOutputs: [{ type: "text", languages: ["en"] }],
-};
+const GEMMA_MODEL_ID = "onnx-community/gemma-4-E2B-it-ONNX";
+const GEMMA_MODEL_TITLE = "Gemma 4 E2B Instruct";
+const GEMMA_MODEL_DTYPE = "q4f16";
+const GEMMA_OFFSCREEN_PATH = "offscreen.html";
 const MONITOR_SUGGESTIONS_CACHE_TTL_MS = 20 * 60 * 1000;
 const MONITOR_SUGGESTIONS_MAX_COUNT = 5;
 const MONITOR_SUGGESTIONS_MAX_TEXT_CHARS = 500;
@@ -65,8 +65,21 @@ const tabsWithSuggestionSignal = new Set();
 const lastSuggestionAnimationFingerprint = new Map();
 const monitorSuggestionsTriggerTimers = new Map();
 let actionIconBitmapsPromise;
-let monitorSuggestionsSessionPromise = null;
 let monitorSuggestionsPromptQueue = Promise.resolve();
+let gemmaInitializationPromise = null;
+let gemmaOffscreenDocumentPromise = null;
+let gemmaOffscreenRequestId = 0;
+const gemmaOffscreenRequests = new Map();
+let gemmaModelState = {
+  status: "idle",
+  modelId: GEMMA_MODEL_ID,
+  title: GEMMA_MODEL_TITLE,
+  dtype: GEMMA_MODEL_DTYPE,
+  percentage: 0,
+  cached: false,
+  size: 0,
+  error: "",
+};
 let cookieSyncAccountKeyCache = "";
 let cookieSyncAccountKeyLoadPromise = null;
 let cookieSyncAccountCacheVersion = 0;
@@ -85,6 +98,193 @@ function formatError(error) {
   }
 
   return String(error);
+}
+
+function serializeGemmaModelState(patch = {}) {
+  gemmaModelState = {
+    ...gemmaModelState,
+    ...patch,
+    modelId: GEMMA_MODEL_ID,
+    title: GEMMA_MODEL_TITLE,
+    dtype: GEMMA_MODEL_DTYPE,
+  };
+
+  return { ...gemmaModelState };
+}
+
+function broadcastGemmaModelState(patch = {}) {
+  const state = serializeGemmaModelState(patch);
+  chrome.runtime.sendMessage({
+    type: "gemma-model-progress",
+    state,
+  }).catch(() => {
+    // Popup may not be open.
+  });
+  return state;
+}
+
+async function hasGemmaOffscreenDocument() {
+  if (chrome.offscreen?.hasDocument) {
+    return chrome.offscreen.hasDocument();
+  }
+
+  if (chrome.runtime?.getContexts) {
+    const contexts = await chrome.runtime.getContexts({
+      contextTypes: ["OFFSCREEN_DOCUMENT"],
+      documentUrls: [chrome.runtime.getURL(GEMMA_OFFSCREEN_PATH)],
+    });
+    return contexts.length > 0;
+  }
+
+  return false;
+}
+
+async function ensureGemmaOffscreenDocument() {
+  if (gemmaOffscreenDocumentPromise) {
+    return gemmaOffscreenDocumentPromise;
+  }
+
+  gemmaOffscreenDocumentPromise = (async () => {
+    if (await hasGemmaOffscreenDocument()) {
+      return;
+    }
+
+    await chrome.offscreen.createDocument({
+      url: GEMMA_OFFSCREEN_PATH,
+      reasons: ["BLOBS"],
+      justification: "Run the local Gemma model outside the MV3 service worker.",
+    });
+  })().finally(() => {
+    gemmaOffscreenDocumentPromise = null;
+  });
+
+  return gemmaOffscreenDocumentPromise;
+}
+
+async function sendGemmaOffscreenRequest(type, payload = {}) {
+  await ensureGemmaOffscreenDocument();
+
+  const requestId = `gemma-${Date.now()}-${++gemmaOffscreenRequestId}`;
+  const responsePromise = new Promise((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      gemmaOffscreenRequests.delete(requestId);
+      reject(new Error(`Gemma offscreen request timed out: ${type}`));
+    }, 10 * 60 * 1000);
+
+    gemmaOffscreenRequests.set(requestId, {
+      resolve,
+      reject,
+      timeoutId,
+    });
+  });
+
+  try {
+    await chrome.runtime.sendMessage({
+      target: "gemma-offscreen",
+      requestId,
+      type,
+      payload,
+    });
+  } catch (error) {
+    const pending = gemmaOffscreenRequests.get(requestId);
+    if (pending) {
+      clearTimeout(pending.timeoutId);
+      gemmaOffscreenRequests.delete(requestId);
+      pending.reject(error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+
+  return responsePromise;
+}
+
+async function refreshGemmaModelState() {
+  if (gemmaInitializationPromise || ["checking", "downloading", "loading"].includes(gemmaModelState.status)) {
+    return { ...gemmaModelState };
+  }
+
+  try {
+    const status = await sendGemmaOffscreenRequest("gemma-model-status");
+    return serializeGemmaModelState({
+      status: status.cached ? "ready" : "not_downloaded",
+      percentage: status.cached ? 100 : 0,
+      cached: Boolean(status.cached),
+      size: Number(status.size ?? 0),
+      error: "",
+    });
+  } catch (error) {
+    return serializeGemmaModelState({
+      status: "error",
+      error: formatError(error),
+    });
+  }
+}
+
+async function ensureGemmaModelInitialized(reason = "manual") {
+  if (gemmaInitializationPromise) {
+    return gemmaInitializationPromise;
+  }
+
+  gemmaInitializationPromise = (async () => {
+    broadcastGemmaModelState({
+      status: "checking",
+      error: "",
+    });
+
+    const status = await sendGemmaOffscreenRequest("gemma-model-status");
+    serializeGemmaModelState({
+      cached: Boolean(status.cached),
+      size: Number(status.size ?? 0),
+      percentage: status.cached ? 100 : 0,
+    });
+
+    if (!status.cached) {
+      broadcastGemmaModelState({
+        status: "downloading",
+        percentage: 0,
+      });
+    } else {
+      broadcastGemmaModelState({
+        status: "loading",
+        percentage: 100,
+      });
+    }
+
+    await sendGemmaOffscreenRequest("initialize-gemma-model", { reason });
+
+    return broadcastGemmaModelState({
+      status: "ready",
+      cached: true,
+      percentage: 100,
+      error: "",
+      lastInitializedReason: reason,
+    });
+  })().catch((error) => {
+    const state = broadcastGemmaModelState({
+      status: "error",
+      error: formatError(error),
+    });
+    throw Object.assign(error instanceof Error ? error : new Error(String(error)), {
+      gemmaModelState: state,
+    });
+  }).finally(() => {
+    gemmaInitializationPromise = null;
+  });
+
+  return gemmaInitializationPromise;
+}
+
+async function promptGemmaModel(prompt, options = {}) {
+  await ensureGemmaModelInitialized("prompt");
+  const response = await sendGemmaOffscreenRequest("gemma-generate-text", {
+    prompt,
+    messages: options.messages,
+    systemPrompt: options.systemPrompt,
+    maxNewTokens: options.maxNewTokens ?? 1024,
+    resetCache: true,
+    tools: options.tools,
+  });
+
+  return String(response.text ?? "");
 }
 
 function safeParseUrl(url) {
@@ -686,41 +886,6 @@ async function parseSuggestionsFromModelResponse(text) {
   }
 }
 
-async function createMonitorSuggestionsSession() {
-  if (!("LanguageModel" in globalThis)) {
-    throw new Error("Prompt API is unavailable in this Chrome build.");
-  }
-
-  const availability = await LanguageModel.availability(MONITOR_SUGGESTIONS_MODEL_OPTIONS);
-  if (availability === "unavailable") {
-    throw new Error("Chrome local model is unavailable on this device/profile.");
-  }
-
-  return LanguageModel.create({
-    ...MONITOR_SUGGESTIONS_MODEL_OPTIONS,
-    initialPrompts: [
-      {
-        role: "system",
-        content:
-          "You identify concrete webpage changes that are useful to monitor. You return concise JSON only.",
-      },
-    ],
-  });
-}
-
-async function getSharedMonitorSuggestionsSession() {
-  if (monitorSuggestionsSessionPromise) {
-    return monitorSuggestionsSessionPromise;
-  }
-
-  monitorSuggestionsSessionPromise = createMonitorSuggestionsSession().catch((error) => {
-    monitorSuggestionsSessionPromise = null;
-    throw error;
-  });
-
-  return monitorSuggestionsSessionPromise;
-}
-
 function queueMonitorSuggestionsPrompt(task) {
   const queued = monitorSuggestionsPromptQueue.then(task, task);
   monitorSuggestionsPromptQueue = queued.then(
@@ -732,15 +897,11 @@ function queueMonitorSuggestionsPrompt(task) {
 
 async function promptMonitorSuggestions(promptText) {
   return queueMonitorSuggestionsPrompt(async () => {
-    try {
-      const session = await getSharedMonitorSuggestionsSession();
-      return await session.prompt(promptText);
-    } catch (_error) {
-      // If a shared session goes stale, recreate once and retry.
-      monitorSuggestionsSessionPromise = null;
-      const session = await getSharedMonitorSuggestionsSession();
-      return session.prompt(promptText);
-    }
+    return promptGemmaModel(promptText, {
+      systemPrompt:
+        "You identify concrete webpage changes that are useful to monitor. You return concise JSON only.",
+      maxNewTokens: 512,
+    });
   });
 }
 
@@ -1664,6 +1825,7 @@ async function buildPopupState() {
       userEmail,
       savedJobPresets,
       tab: tabSummary,
+      gemmaModel: { ...gemmaModelState },
     };
   }
 
@@ -1696,6 +1858,7 @@ async function buildPopupState() {
     isBusinessUser,
     userEmail,
     savedJobPresets,
+    gemmaModel: { ...gemmaModelState },
   };
 }
 
@@ -2332,10 +2495,104 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
   }
 });
 
+chrome.runtime.onInstalled.addListener(() => {
+  ensureGemmaModelInitialized("install").catch((error) => {
+    console.error("Failed to initialize Gemma model after install.", error);
+  });
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  refreshGemmaModelState().catch((error) => {
+    console.warn("Failed to refresh Gemma model state on startup.", error);
+  });
+});
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
+    if (message?.target === "gemma-background") {
+      if (message.type === "gemma-model-progress") {
+        broadcastGemmaModelState(message.state ?? {});
+        sendResponse({ ok: true });
+        return;
+      }
+
+      const pending = gemmaOffscreenRequests.get(message.requestId);
+      if (pending) {
+        clearTimeout(pending.timeoutId);
+        gemmaOffscreenRequests.delete(message.requestId);
+        if (message.ok) {
+          pending.resolve(message.result ?? {});
+        } else {
+          pending.reject(new Error(message.error ?? "Gemma offscreen request failed."));
+        }
+      }
+
+      sendResponse({ ok: true });
+      return;
+    }
+
     if (message?.type === "popup-state") {
       sendResponse(await buildPopupState());
+      return;
+    }
+
+    if (message?.type === "gemma-model-status") {
+      sendResponse({
+        ok: true,
+        state: await refreshGemmaModelState(),
+      });
+      return;
+    }
+
+    if (message?.type === "initialize-gemma-model") {
+      try {
+        sendResponse({
+          ok: true,
+          state: await ensureGemmaModelInitialized("popup"),
+        });
+      } catch (error) {
+        sendResponse({
+          ok: false,
+          error: formatError(error),
+          state: error?.gemmaModelState ?? { ...gemmaModelState },
+        });
+      }
+      return;
+    }
+
+    if (message?.type === "gemma-generate-text") {
+      try {
+        const payload = message?.payload ?? {};
+        const text = await promptGemmaModel(payload.prompt, {
+          messages: payload.messages,
+          systemPrompt: payload.systemPrompt,
+          maxNewTokens: payload.maxNewTokens,
+          tools: payload.tools,
+        });
+        sendResponse({
+          ok: true,
+          text,
+        });
+      } catch (error) {
+        sendResponse({
+          ok: false,
+          error: formatError(error),
+          state: error?.gemmaModelState ?? { ...gemmaModelState },
+        });
+      }
+      return;
+    }
+
+    if (message?.type === "reset-gemma-conversation-cache") {
+      try {
+        await sendGemmaOffscreenRequest("reset-gemma-conversation-cache");
+        sendResponse({ ok: true });
+      } catch (error) {
+        sendResponse({
+          ok: false,
+          error: formatError(error),
+        });
+      }
       return;
     }
 

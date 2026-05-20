@@ -30,6 +30,16 @@ const uiState = {
     canSelectBackendEnv: false,
     savingBackendEnv: false,
   },
+  gemmaModel: {
+    status: "idle",
+    modelId: "onnx-community/gemma-4-E2B-it-ONNX",
+    title: "Gemma 4 E2B Instruct",
+    dtype: "q4f16",
+    percentage: 0,
+    cached: false,
+    size: 0,
+    error: "",
+  },
   suggestions: {
     isLoading: false,
     hasLoaded: false,
@@ -82,12 +92,95 @@ function formatTimestamp(value) {
   return new Date(value).toLocaleString();
 }
 
-function renderMessage(message) {
-  if (!message?.text || message.type !== "error") {
+function formatBytes(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes <= 0) {
     return "";
   }
 
-  return `<p class="message message--error">${escapeHtml(message.text)}</p>`;
+  const units = ["B", "KB", "MB", "GB"];
+  let size = bytes;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+
+  const digits = unitIndex === 0 || size >= 100 ? 0 : 1;
+  return `${size.toFixed(digits)} ${units[unitIndex]}`;
+}
+
+function getGemmaStatusLabel(status) {
+  if (status === "ready") {
+    return "Ready";
+  }
+  if (status === "checking") {
+    return "Checking";
+  }
+  if (status === "downloading") {
+    return "Downloading";
+  }
+  if (status === "loading") {
+    return "Loading";
+  }
+  if (status === "error") {
+    return "Error";
+  }
+  if (status === "not_downloaded") {
+    return "Not downloaded";
+  }
+  return "Preparing";
+}
+
+function renderGemmaModelStatus() {
+  const model = uiState.gemmaModel ?? {};
+  const status = String(model.status ?? "idle");
+  const percentage = Math.max(0, Math.min(100, Math.round(Number(model.percentage ?? 0))));
+  const sizeLabel = formatBytes(model.size);
+  const isBusy = status === "checking" || status === "downloading" || status === "loading";
+  const shouldShow = isBusy || status === "error" || status === "not_downloaded";
+
+  if (!shouldShow) {
+    return "";
+  }
+
+  const actionButton = status === "error" || status === "not_downloaded"
+    ? `<button id="initialize-gemma-model" class="button-ghost gemma-model__button" type="button">Download</button>`
+    : "";
+  const detail = status === "error"
+    ? String(model.error ?? "Could not prepare the local model.")
+    : sizeLabel
+      ? `${getGemmaStatusLabel(status)} ${sizeLabel}`
+      : getGemmaStatusLabel(status);
+
+  return `
+    <section class="gemma-model" aria-live="polite">
+      <div class="gemma-model__header">
+        <span class="gemma-model__title">${escapeHtml(model.title ?? "Gemma 4 E2B Instruct")}</span>
+        <span class="gemma-model__status">${escapeHtml(detail)}</span>
+        ${actionButton}
+      </div>
+      <div class="gemma-model__track">
+        <div class="gemma-model__bar" style="width: ${percentage}%"></div>
+      </div>
+    </section>
+  `;
+}
+
+function renderMessage(message) {
+  if (!message?.text) {
+    return "";
+  }
+
+  if (message.type === "success") {
+    return `<p class="message message--success">${escapeHtml(message.text)}</p>`;
+  }
+
+  if (message.type === "error") {
+    return `<p class="message message--error">${escapeHtml(message.text)}</p>`;
+  }
+
+  return "";
 }
 
 function renderTrackedJobs(trackedJobs, frequencyOptions) {
@@ -581,6 +674,7 @@ function renderApp() {
       </button>
     </div>
     <div class="topbar-divider"></div>
+    ${renderGemmaModelStatus()}
     <div class="${tabContentClass}">
       ${createActive ? renderCreateTab() : jobsActive ? renderJobsTab() : renderSettingsTab()}
     </div>
@@ -696,6 +790,12 @@ async function refreshPopupState() {
   uiState.settings.monitorSuggestionsEnabled = Boolean(state?.monitorSuggestionsEnabled);
   uiState.settings.backendEnv = String(state?.backendEnv ?? "prod");
   uiState.settings.canSelectBackendEnv = state?.canSelectBackendEnv === true;
+  if (state?.gemmaModel) {
+    uiState.gemmaModel = {
+      ...uiState.gemmaModel,
+      ...state.gemmaModel,
+    };
+  }
   const nextTabUrl = state?.tab?.url ?? "";
 
   if (!state?.supportedPage && state?.loggedIn && uiState.activeTab === "create") {
@@ -718,6 +818,42 @@ async function refreshPopupState() {
   }
 
   syncCreatePresetSelection(state);
+}
+
+async function refreshGemmaModelStatus() {
+  const response = await chrome.runtime.sendMessage({ type: "gemma-model-status" });
+  if (response?.state) {
+    uiState.gemmaModel = {
+      ...uiState.gemmaModel,
+      ...response.state,
+    };
+    renderApp();
+  }
+}
+
+async function initializeGemmaModel() {
+  uiState.gemmaModel = {
+    ...uiState.gemmaModel,
+    status: "checking",
+    error: "",
+  };
+  renderApp();
+
+  const response = await chrome.runtime.sendMessage({ type: "initialize-gemma-model" });
+  if (response?.state) {
+    uiState.gemmaModel = {
+      ...uiState.gemmaModel,
+      ...response.state,
+    };
+  }
+  if (!response?.ok && response?.error) {
+    uiState.gemmaModel = {
+      ...uiState.gemmaModel,
+      status: "error",
+      error: response.error,
+    };
+  }
+  renderApp();
 }
 
 async function handleBackendEnvChange(backendEnv) {
@@ -871,7 +1007,7 @@ async function handleCreateJobSubmit(event) {
 
   uiState.createFlash = {
     type: "success",
-    text: `Created job #${response.jobId}. Cookie sync is active with ${response.cookieCount} cookies.`,
+    text: "New monitor added",
   };
   uiState.jobsFlash = {
     type: "success",
@@ -1149,6 +1285,10 @@ function bindEvents() {
     handleSettingsToggle();
   });
 
+  document.querySelector("#initialize-gemma-model")?.addEventListener("click", () => {
+    void initializeGemmaModel();
+  });
+
   document.querySelector("#open-login")?.addEventListener("click", () => {
     void handleOpenLogin();
   });
@@ -1262,6 +1402,7 @@ function focusAlertConditionField() {
 async function bootstrap() {
   await refreshPopupState();
   renderApp();
+  void refreshGemmaModelStatus();
   focusAlertConditionField();
 
   if (uiState.popupState?.loggedIn && uiState.popupState?.supportedPage && uiState.settings.monitorSuggestionsEnabled) {
@@ -1272,6 +1413,18 @@ async function bootstrap() {
     await loadJobsPage();
   }
 }
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type !== "gemma-model-progress") {
+    return;
+  }
+
+  uiState.gemmaModel = {
+    ...uiState.gemmaModel,
+    ...message.state,
+  };
+  renderApp();
+});
 
 bootstrap().catch((error) => {
   const app = document.querySelector("#app");
