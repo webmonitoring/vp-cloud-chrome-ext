@@ -32,8 +32,8 @@ const uiState = {
   },
   gemmaModel: {
     status: "idle",
-    modelId: "onnx-community/Qwen2.5-Coder-0.5B-Instruct",
-    title: "Qwen2.5 Coder 0.5B",
+    modelId: "onnx-community/gemma-4-E2B-it-ONNX",
+    title: "Gemma 4 E2B Instruct",
     dtype: "q4f16",
     percentage: 0,
     cached: false,
@@ -156,7 +156,7 @@ function renderGemmaModelStatus() {
   return `
     <section class="gemma-model" aria-live="polite">
       <div class="gemma-model__header">
-        <span class="gemma-model__title">${escapeHtml(model.title ?? "Qwen2.5 Coder 0.5B")}</span>
+        <span class="gemma-model__title">${escapeHtml(model.title ?? "Gemma 4 E2B Instruct")}</span>
         <span class="gemma-model__status">${escapeHtml(detail)}</span>
         ${actionButton}
       </div>
@@ -168,11 +168,19 @@ function renderGemmaModelStatus() {
 }
 
 function renderMessage(message) {
-  if (!message?.text || message.type !== "error") {
+  if (!message?.text) {
     return "";
   }
 
-  return `<p class="message message--error">${escapeHtml(message.text)}</p>`;
+  if (message.type === "success") {
+    return `<p class="message message--success">${escapeHtml(message.text)}</p>`;
+  }
+
+  if (message.type === "error") {
+    return `<p class="message message--error">${escapeHtml(message.text)}</p>`;
+  }
+
+  return "";
 }
 
 function renderTrackedJobs(trackedJobs, frequencyOptions) {
@@ -999,7 +1007,7 @@ async function handleCreateJobSubmit(event) {
 
   uiState.createFlash = {
     type: "success",
-    text: `Created job #${response.jobId}. Cookie sync is active with ${response.cookieCount} cookies.`,
+    text: "New monitor added",
   };
   uiState.jobsFlash = {
     type: "success",

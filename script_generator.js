@@ -229,44 +229,164 @@ function parseJsonCandidates(rawText) {
 function extractGemmaToolCalls(text) {
   const value = String(text ?? "");
   const calls = [];
-  let searchFrom = 0;
 
-  while (searchFrom < value.length) {
-    const start = value.indexOf("<|tool_call>", searchFrom);
-    if (start === -1) {
-      break;
+  function pushCall(name, args, raw) {
+    calls.push({
+      id: `tool-call-${calls.length + 1}`,
+      name: String(name),
+      arguments: args ?? {},
+      raw: String(raw ?? ""),
+    });
+  }
+
+  // 1. Qwen-style: <tool_call>{...}</tool_call> (JSON inside)
+  let m;
+  const qwenRe = /<tool_call>([\s\S]*?)<\/tool_call>/g;
+  while ((m = qwenRe.exec(value))) {
+    try {
+      const parsed = JSON.parse(String(m[1]).trim());
+      if (parsed && typeof parsed === "object" && parsed.name) {
+        pushCall(parsed.name, parsed.arguments ?? parsed.parameters ?? {}, m[1]);
+      }
+    } catch (_e) {}
+  }
+
+  // 2. Gemma-tagged: <|tool_call>call:NAME{...}<tool_call|>
+  const gemmaTaggedRe = /<\|tool_call\>([\s\S]*?)<tool_call\|>/g;
+  while ((m = gemmaTaggedRe.exec(value))) {
+    const payload = m[1].trim();
+    const nameMatch = payload.match(/^call:([^\{]+)\{/);
+    const argsMatch = payload.match(/^call:[^\{]+(\{[\s\S]*\})$/);
+    if (nameMatch) {
+      const name = nameMatch[1].trim();
+      const args = argsMatch ? parseGemmaArguments(argsMatch[1]) : {};
+      pushCall(name, args, payload);
     }
+  }
 
-    const end = value.indexOf("<tool_call|>", start);
-    if (end === -1) {
-      break;
+  // 3. Llama 3.2-style: optional <|python_tag|>, then a bare JSON object with name + parameters/arguments.
+  //    Llama renders one tool call per assistant turn, so cap at 1.
+  if (calls.length === 0) {
+    const scan = value.replace(/<\|python_tag\|>/g, "");
+    for (let i = 0; i < scan.length; i++) {
+      if (scan[i] !== "{") continue;
+      const obj = readJsonObject(scan, i);
+      if (!obj) continue;
+      try {
+        const parsed = JSON.parse(obj.text);
+        if (parsed && typeof parsed === "object" && parsed.name) {
+          pushCall(parsed.name, parsed.arguments ?? parsed.parameters ?? {}, obj.text);
+          break;
+        }
+      } catch (_e) {}
+      i = obj.end;
     }
+  }
 
-    const body = value.slice(start + "<|tool_call>".length, end).trim();
-    const callMatch = body.match(/^call:([A-Za-z_$][\w$]*)\s*\{/);
-    if (callMatch) {
-      const argsStart = body.indexOf("{", callMatch[0].length - 1);
-      const argsEnd = body.lastIndexOf("}");
-      calls.push({
-        id: `tool-call-${calls.length + 1}`,
-        name: callMatch[1],
-        argumentsText: argsStart !== -1 && argsEnd > argsStart
-          ? body.slice(argsStart + 1, argsEnd)
-          : "",
-        raw: body,
-      });
+  // 4. Bare Gemma fallback: call:NAME{...} without surrounding tags.
+  if (calls.length === 0) {
+    let cursor = 0;
+    while (cursor < value.length) {
+      const callStart = value.indexOf("call:", cursor);
+      if (callStart === -1) break;
+      const nameStart = callStart + "call:".length;
+      const braceStart = value.indexOf("{", nameStart);
+      if (braceStart === -1) { cursor = nameStart; continue; }
+      const name = value.slice(nameStart, braceStart).trim();
+      if (!name) { cursor = braceStart + 1; continue; }
+      const body = readJsonObject(value, braceStart);
+      if (!body) { cursor = braceStart + 1; continue; }
+      pushCall(name, parseGemmaArguments(body.text), body.text);
+      cursor = body.end + 1;
     }
-
-    searchFrom = end + "<tool_call|>".length;
   }
 
   return calls;
 }
 
+function parseGemmaArguments(raw) {
+  // Gemma uses <|"|>...<|"|> as a string delimiter that lets the model emit
+  // unescaped quotes/backslashes inside the value (e.g. document.querySelector("...")).
+  // Strategy: extract each <|"|>...<|"|> region verbatim, replace with a placeholder
+  // so JSON.parse works, then substitute the original content back.
+  const source = String(raw ?? "");
+  const literals = [];
+  let placeheld = "";
+  let i = 0;
+  const marker = "<|\"|>";
+  while (i < source.length) {
+    const open = source.indexOf(marker, i);
+    if (open === -1) {
+      placeheld += source.slice(i);
+      break;
+    }
+    placeheld += source.slice(i, open);
+    const close = source.indexOf(marker, open + marker.length);
+    if (close === -1) {
+      // Unbalanced — treat the rest as plain text and bail.
+      placeheld += source.slice(open);
+      break;
+    }
+    const inner = source.slice(open + marker.length, close);
+    const index = literals.push(inner) - 1;
+    placeheld += `"__GEMMA_LITERAL_${index}__"`;
+    i = close + marker.length;
+  }
+  const normalized = placeheld.replace(/([{,]\s*)([A-Za-z_]\w*)\s*:/g, "$1\"$2\":");
+  try {
+    let parsed = JSON.parse(normalized);
+    if (parsed && typeof parsed === "object") {
+      // Substitute placeholders back to their raw content.
+      const restore = (val) => {
+        if (typeof val === "string") {
+          const m = val.match(/^__GEMMA_LITERAL_(\d+)__$/);
+          return m ? literals[Number(m[1])] : val;
+        }
+        if (Array.isArray(val)) return val.map(restore);
+        if (val && typeof val === "object") {
+          const out = {};
+          for (const k of Object.keys(val)) out[k] = restore(val[k]);
+          return out;
+        }
+        return val;
+      };
+      parsed = restore(parsed);
+      return parsed;
+    }
+  } catch (_e) {}
+  return {};
+}
+
+// Read a balanced JSON object starting at index i (which must be '{').
+// Returns { text, end } where end is the index of the closing '}', or null on imbalance.
+function readJsonObject(text, i) {
+  if (text[i] !== "{") return null;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let j = i; j < text.length; j++) {
+    const ch = text[j];
+    if (escape) { escape = false; continue; }
+    if (ch === "\\") { escape = true; continue; }
+    if (ch === "\"") { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return { text: text.slice(i, j + 1), end: j };
+    }
+  }
+  return null;
+}
+
 function stripGemmaToolCalls(text) {
   return String(text ?? "")
+    .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, "")
+    .replace(/<tool_response>[\s\S]*?<\/tool_response>/g, "")
     .replace(/<\|tool_call\>[\s\S]*?<tool_call\|>/g, "")
     .replace(/<\|tool_response\>[\s\S]*?<tool_response\|>/g, "")
+    .replace(/<\|python_tag\|>/g, "")
+    .replace(/<\|eom_id\|>|<\|eot_id\|>|<\|end_of_text\|>|<turn\|>/g, "")
     .trim();
 }
 
@@ -326,7 +446,7 @@ function normalizeToolCallForMessage(toolCall, toolCallId) {
     type: "function",
     function: {
       name: toolCall.name,
-      arguments: parseToolArguments(toolCall.argumentsText),
+      arguments: toolCall.arguments ?? {},
     },
   };
 }
@@ -356,18 +476,113 @@ function buildGenerationPrompt(actionRequest, previousFailure = "") {
     : "";
 
   return [
-    "Use executeScript if needed.",
-    "Return strict JSON only: {\"success\":boolean,\"message\":string,\"script\":string}.",
-    "Generate runnable JavaScript, execute it with executeScript, and verify it works before returning.",
-    "Verify by investigating the live DOM with executeScript after running the action.",
-    "Set success=true only if DOM investigation via executeScript confirms the requested action worked.",
-    "If verification fails, set success=false and explain why in message.",
-    "script should refresh at the end to restore page state.",
+    "Follow the INSPECT → ACT → VERIFY → REPORT steps from your instructions.",
+    "After running the action script (ACT), you MUST call executeScript again (VERIFY) to confirm the expected results are present in the DOM before returning JSON.",
     retryContext,
     `Request: ${actionRequest}`,
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+function summarizeInspection(inspection, actionRequest) {
+  const tokens = String(actionRequest ?? "")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t.length > 2);
+
+  const tokenMatch = (text) => {
+    const s = String(text ?? "").toLowerCase();
+    return tokens.some((t) => s.includes(t));
+  };
+
+  const trim = (text, max = 60) => {
+    const s = String(text ?? "").trim();
+    return s.length > max ? `${s.slice(0, max)}…` : s;
+  };
+
+  // Selects: keep id, name, selectedText, plus matching options + the currently selected one.
+  // Cap to 6 options each and 6 selects total.
+  const selects = (inspection.selects || [])
+    .slice(0, 6)
+    .map((sel) => {
+      const opts = sel.options || [];
+      const selectedValue = sel.value;
+      const matches = opts.filter((o) => tokenMatch(o.text)).slice(0, 5);
+      const selectedOpt = opts.find((o) => o.value === selectedValue);
+      const keep = [];
+      if (selectedOpt) keep.push({ value: selectedOpt.value, text: trim(selectedOpt.text), selected: true });
+      for (const o of matches) {
+        if (o.value !== selectedValue) keep.push({ value: o.value, text: trim(o.text) });
+      }
+      return {
+        id: sel.id || undefined,
+        name: sel.name || undefined,
+        selector: sel.selector,
+        selectedValue,
+        totalOptions: opts.length,
+        options: keep,
+      };
+    });
+
+  // Inputs: key fields only, cap to 12.
+  const inputs = (inspection.inputs || [])
+    .slice(0, 12)
+    .map((i) => ({
+      selector: i.selector,
+      tag: i.tag,
+      type: i.type,
+      name: i.name || undefined,
+      placeholder: i.placeholder ? trim(i.placeholder, 40) : undefined,
+      value: i.value ? trim(i.value, 30) : undefined,
+    }));
+
+  // Candidates: selector + short text + a couple of flags, cap to 12, prefer token matches.
+  // Add an `index` per (selector) group so the model can disambiguate when several
+  // candidates share the same selector (e.g. 10 identical <button> tags).
+  const allCandidates = inspection.candidates || [];
+  const matched = allCandidates.filter((c) => tokenMatch(c.text) || tokenMatch(c.value));
+  const candidatesPool = matched.length ? matched : allCandidates;
+  const seenBySelector = new Map();
+  const candidates = candidatesPool.slice(0, 12).map((c) => {
+    const sel = c.selector;
+    const index = seenBySelector.get(sel) ?? 0;
+    seenBySelector.set(sel, index + 1);
+    return {
+      selector: sel,
+      index,
+      tag: c.tag,
+      text: c.text ? trim(c.text, 80) : undefined,
+      value: c.value ? trim(c.value, 30) : undefined,
+      checked: typeof c.checked === "boolean" ? c.checked : undefined,
+      disabled: c.disabled || undefined,
+    };
+  });
+
+  return {
+    url: inspection.url,
+    title: inspection.title,
+    selects,
+    inputs,
+    candidates,
+  };
+}
+
+function coerceScriptString(value) {
+  if (typeof value === "string") {
+    return value.trim();
+  }
+  if (value && typeof value === "object") {
+    // Model sometimes nests another tool-call shape in the script field.
+    if (typeof value.script === "string") return String(value.script).trim();
+    if (value.parameters && typeof value.parameters.script === "string") {
+      return String(value.parameters.script).trim();
+    }
+    if (value.arguments && typeof value.arguments.script === "string") {
+      return String(value.arguments.script).trim();
+    }
+  }
+  return "";
 }
 
 function ensureExecutableScript(script) {
@@ -1026,12 +1241,23 @@ async function resolveTargetTabId() {
   throw new Error("Could not determine the target tab for script generation.");
 }
 
-async function promptModelWithExecuteScriptTool(session, tabId, prompt) {
+async function promptModelWithExecuteScriptTool(session, tabId, prompt, actionRequest) {
   const messages = [
     {
       role: "system",
-      content:
-        "Use executeScript to inspect and verify behavior in the live DOM to make sure script succeeds and modifies DOM as needed. Return strict JSON only: {\"success\":boolean,\"message\":string,\"script\":string}. Set success=true only after DOM-based verification.",
+      content: [
+        "You are a JavaScript automation agent.",
+        "A summary of the relevant DOM (selects with their tokens-matching options, inputs, candidate elements) is provided in the first tool response. Use selectors from that summary. If you need more detail, you may call executeScript yourself to query the page.",
+        "Each candidate has both a `selector` and an `index` field. When multiple candidates share the same selector, target a specific one with `document.querySelectorAll(selector)[index]`. The list order matches the DOM order (index 0 is the first, index 2 is the third, etc.). Do NOT use CSS pseudo-classes like :nth-child unless they appear in the selector itself — they will not work reliably on this page.",
+        "Follow these steps in order:",
+        "1. ACT – call executeScript with the action script that performs the requested operation, using selectors and indices from the summary.",
+        "2. VERIFY – call executeScript to confirm the expected DOM state after ACT. Do not skip this step.",
+        "3. REPORT – return strict JSON and nothing else: {\"success\":boolean,\"message\":string,\"script\":string}",
+        "   • success=true only if VERIFY confirmed the result.",
+        "   • message explains what was verified or why it failed.",
+        "   • script MUST be a plain string of the JavaScript source code from step 1. Not an object. Not a nested tool call.",
+        "   • If the action could not be completed (e.g. the target element does not exist on this page), set success=false and explain.",
+      ].join("\n"),
     },
     {
       role: "user",
@@ -1039,8 +1265,45 @@ async function promptModelWithExecuteScriptTool(session, tabId, prompt) {
     },
   ];
 
-  // Single generation pass, but multi-step tool handshake so the model can finish its own tool flow.
-  for (let handshake = 0; handshake < 8; handshake += 1) {
+  // Pre-INSPECT: run the host-side DOM inspector once and feed a *compact* summary
+  // as a synthetic tool response so the model starts with real selectors. Heavy
+  // pages would otherwise drown the context — we keep only what's relevant.
+  try {
+    const inspection = await inspectDom(tabId, actionRequest ?? prompt);
+    if (inspection) {
+      const summary = summarizeInspection(inspection, actionRequest ?? prompt);
+      const counts = `${summary.selects.length} selects, ${summary.inputs.length} inputs, ${summary.candidates.length} candidates`;
+      appendThinking(`Pre-INSPECT done (${counts}, payload ${JSON.stringify(summary).length}B).`);
+      const preInspectId = "tool-call-pre-inspect";
+      messages.push({
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          {
+            id: preInspectId,
+            type: "function",
+            function: {
+              name: "executeScript",
+              arguments: { script: "/* host-side INSPECT: returns a compact summary of selects/inputs/candidates relevant to the request */" },
+            },
+          },
+        ],
+      });
+      messages.push({
+        role: "tool",
+        tool_call_id: preInspectId,
+        content: JSON.stringify({ ok: true, result: summary }),
+      });
+    }
+  } catch (error) {
+    appendThinking(`Pre-INSPECT failed: ${truncateForThinking(error instanceof Error ? error.message : String(error))}`);
+  }
+
+  const MAX_TOOL_HANDSHAKES = 4;
+  let lastSuccessfulActionScript = "";
+  let didRunAnyTool = false;
+  // Multi-step tool handshake so the model can iterate ACT/VERIFY, then we force REPORT.
+  for (let handshake = 0; handshake < MAX_TOOL_HANDSHAKES; handshake += 1) {
     logLlmInteraction("tool prompt", {
       handshake: handshake + 1,
       messages,
@@ -1057,8 +1320,19 @@ async function promptModelWithExecuteScriptTool(session, tabId, prompt) {
       toolCalls,
     });
 
+    // Treat a response with a {success, script} shape as the final answer even if
+    // the model wrapped it in tool-call syntax.
+    if (looksLikeFinalReport(modelResponse)) {
+      return { text: stripGemmaToolCalls(modelResponse), fallbackScript: lastSuccessfulActionScript };
+    }
+
     if (!toolCalls.length) {
-      return stripGemmaToolCalls(modelResponse);
+      const stripped = stripGemmaToolCalls(modelResponse);
+      // Empty / EOS-only response after tool use → force REPORT so we don't lose the work.
+      if (didRunAnyTool && !stripped) {
+        break;
+      }
+      return { text: stripped, fallbackScript: lastSuccessfulActionScript };
     }
 
     appendThinking(`LLM requested ${toolCalls.length} executeScript call${toolCalls.length === 1 ? "" : "s"}.`);
@@ -1089,10 +1363,13 @@ async function promptModelWithExecuteScriptTool(session, tabId, prompt) {
 
       const toolArgs = normalizedToolCall.function.arguments;
       appendThinking(`Tool ${index + 1}/${toolCalls.length} executeScript started.`);
-      appendThinking(`executeScript input: ${truncateForThinking(String(toolArgs?.script ?? ""), 180)}`);
+      const argScript = String(toolArgs?.script ?? "");
+      appendThinking(`executeScript input: ${truncateForThinking(argScript, 180)}`);
       const result = await executeScriptToolInTab(tabId, toolArgs);
+      didRunAnyTool = true;
       if (result?.ok) {
         appendThinking(`Tool ${index + 1}/${toolCalls.length} executeScript succeeded.`);
+        if (argScript.trim()) lastSuccessfulActionScript = argScript;
       } else {
         appendThinking(`Tool ${index + 1}/${toolCalls.length} executeScript failed: ${truncateForThinking(String(result?.error ?? "Unknown error"), 220)}`);
       }
@@ -1105,7 +1382,33 @@ async function promptModelWithExecuteScriptTool(session, tabId, prompt) {
     }
   }
 
-  throw new Error("Model exceeded executeScript handshake limit before returning final JSON.");
+  // Forced-REPORT pass: drop tools, demand the final JSON, take one shot.
+  appendThinking("Forcing REPORT pass.");
+  messages.push({
+    role: "user",
+    content: [
+      "Stop calling executeScript. Based on what you have already tried, return ONLY the final JSON now.",
+      "Format: {\"success\":boolean,\"message\":string,\"script\":string}",
+      "The script field MUST be a single plain-string of JavaScript source that accomplishes the original request, using the real selectors from the inspection. No nested objects, no tool-call shape.",
+    ].join("\n"),
+  });
+  logLlmInteraction("forced report prompt", { messages });
+  const finalResponse = await session.prompt(messages, {
+    maxNewTokens: 512,
+  });
+  logLlmInteraction("forced report response", { finalResponse });
+  return { text: stripGemmaToolCalls(finalResponse), fallbackScript: lastSuccessfulActionScript };
+}
+
+function looksLikeFinalReport(text) {
+  const value = String(text ?? "");
+  // Strip code fences and Llama markers.
+  const cleaned = value
+    .replace(/```(?:json)?\s*([\s\S]*?)\s*```/g, "$1")
+    .replace(/<\|python_tag\|>|<\|eom_id\|>|<\|eot_id\|>/g, "")
+    .trim();
+  // Look for a JSON object that has both `success` and `script` keys.
+  return /\"success\"\s*:/.test(cleaned) && /\"script\"\s*:/.test(cleaned) && !/\"name\"\s*:\s*\"executeScript\"/.test(cleaned);
 }
 
 async function generateScriptWithValidation(actionRequest, tabId) {
@@ -1114,7 +1417,7 @@ async function generateScriptWithValidation(actionRequest, tabId) {
     setStatus("", "Thinking... drafting and testing script.");
     appendThinking("Prompting local LLM once with executeScript available.");
     const prompt = buildGenerationPrompt(actionRequest, "");
-    const modelResponse = await promptModelWithExecuteScriptTool(session, tabId, prompt);
+    const { text: modelResponse, fallbackScript } = await promptModelWithExecuteScriptTool(session, tabId, prompt, actionRequest);
 
     let parsed;
     try {
@@ -1134,7 +1437,11 @@ async function generateScriptWithValidation(actionRequest, tabId) {
       };
     }
 
-    const script = String(parsed.script ?? "").trim();
+    let script = coerceScriptString(parsed.script);
+    if (!script && fallbackScript) {
+      appendThinking("Final REPORT had no script; falling back to the last successful tool-call script.");
+      script = fallbackScript.trim();
+    }
     const executableScript = ensureExecutableScript(script);
     const modelSuccess = Boolean(parsed.success);
     const modelMessage = String(parsed.message ?? "").trim();
