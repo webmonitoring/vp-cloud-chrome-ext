@@ -202,7 +202,28 @@ async function sendGemmaOffscreenRequest(type, payload = {}) {
   return responsePromise;
 }
 
+async function isLocalLlmBackend() {
+  return (await getLlmSettings()).backend === "local";
+}
+
+async function closeGemmaOffscreenIfLoaded() {
+  try {
+    if (chrome.offscreen?.hasDocument && (await chrome.offscreen.hasDocument())) {
+      await chrome.offscreen.closeDocument();
+    }
+  } catch (_e) {
+    // best-effort teardown
+  }
+  gemmaOffscreenDocumentPromise = null;
+  gemmaInitializationPromise = null;
+  serializeGemmaModelState({ status: "idle", percentage: 0, error: "" });
+}
+
 async function refreshGemmaModelState() {
+  if (!(await isLocalLlmBackend())) {
+    // Backend is not local — don't spin up the offscreen doc just to check status.
+    return { ...gemmaModelState };
+  }
   if (gemmaInitializationPromise || ["checking", "downloading", "loading"].includes(gemmaModelState.status)) {
     return { ...gemmaModelState };
   }
@@ -227,6 +248,10 @@ async function refreshGemmaModelState() {
 async function ensureGemmaModelInitialized(reason = "manual") {
   if (gemmaInitializationPromise) {
     return gemmaInitializationPromise;
+  }
+  if (!(await isLocalLlmBackend())) {
+    // Skip loading the ~3GB local model when the user has chosen a remote backend.
+    return { ...gemmaModelState };
   }
 
   gemmaInitializationPromise = (async () => {
@@ -2565,15 +2590,25 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
 });
 
 chrome.runtime.onInstalled.addListener(() => {
-  ensureGemmaModelInitialized("install").catch((error) => {
-    console.error("Failed to initialize Gemma model after install.", error);
-  });
+  (async () => {
+    if (!(await isLocalLlmBackend())) return;
+    try {
+      await ensureGemmaModelInitialized("install");
+    } catch (error) {
+      console.error("Failed to initialize Gemma model after install.", error);
+    }
+  })();
 });
 
 chrome.runtime.onStartup.addListener(() => {
-  refreshGemmaModelState().catch((error) => {
-    console.warn("Failed to refresh Gemma model state on startup.", error);
-  });
+  (async () => {
+    if (!(await isLocalLlmBackend())) return;
+    try {
+      await refreshGemmaModelState();
+    } catch (error) {
+      console.warn("Failed to refresh Gemma model state on startup.", error);
+    }
+  })();
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -2739,6 +2774,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       try {
         const backend = normalizeLlmBackend(message?.payload?.backend);
         await setLlmBackend(backend);
+        if (backend !== "local") {
+          await closeGemmaOffscreenIfLoaded();
+        }
         sendResponse({ ok: true, backend });
       } catch (error) {
         sendResponse({ ok: false, error: formatError(error) });
