@@ -1776,7 +1776,11 @@ function convertRecordingToPreactions(actions) {
     }
 
     if (action.type === "setChecked") {
-      preactions.push({ click: action.selector });
+      const sel = action.selector.replace(/'/g, "\\'");
+      const checked = Boolean(action.checked);
+      preactions.push({
+        script: `(function(){var el=document.querySelector('${sel}');if(el&&el.checked!==${checked}){el.checked=${checked};el.dispatchEvent(new Event('change',{bubbles:true}));}})();`,
+      });
       continue;
     }
   }
