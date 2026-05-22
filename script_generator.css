@@ -181,8 +181,8 @@ button:disabled {
   opacity: 0.55;
 }
 
-.use-recording-btn {
-  width: 100%;
+.use-recording-actions {
+  grid-template-columns: 1fr 1fr;
 }
 
 .recorded-actions-list {

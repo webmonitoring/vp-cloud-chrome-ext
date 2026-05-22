@@ -22,6 +22,7 @@ import {
 } from "./lib/storage.js";
 import {
   buildScriptActionPreactions,
+  buildRecordedActionsPreactions,
   buildCookieSyncPayload,
   buildCreateJobPayload,
   buildCreateJobFromSavedSettingsPayload,
@@ -2398,6 +2399,44 @@ async function getScriptGeneratorContextForTab(payload = {}) {
   };
 }
 
+async function saveRecordedPreactionsForJob(payload = {}) {
+  const jobId = Number(payload.jobId);
+  if (!Number.isInteger(jobId) || jobId <= 0) {
+    throw new Error("A valid Visualping job id is required.");
+  }
+
+  const actions = payload.actions;
+  if (!Array.isArray(actions) || actions.length === 0) {
+    throw new Error("No actions to save.");
+  }
+
+  const config = await getPublicConfig();
+  const session = await requireSession(config);
+  const workspaceId = getPreferredWorkspaceId(session);
+  const jobDetails = await getVisualpingJob(config, session.token, jobId, {
+    workspaceId: workspaceId ?? undefined,
+  });
+
+  const preactions = buildRecordedActionsPreactions(jobDetails.preactions, actions);
+  const updatePayload = {
+    jobId,
+    enable_cookies_and_ad_blocker: true,
+    preactions,
+  };
+
+  if (workspaceId) {
+    updatePayload.workspaceId = workspaceId;
+  }
+
+  await updateVisualpingJob(config, session.token, jobId, updatePayload);
+
+  return {
+    ok: true,
+    jobId,
+    actionCount: actions.length,
+  };
+}
+
 async function saveScriptActionForJob(payload = {}) {
   const jobId = Number(payload.jobId);
   if (!Number.isInteger(jobId) || jobId <= 0) {
@@ -2881,6 +2920,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message?.type === "save-script-action") {
       try {
         sendResponse(await saveScriptActionForJob(message.payload ?? {}));
+      } catch (error) {
+        sendResponse({
+          ok: false,
+          error: formatError(error),
+        });
+      }
+      return;
+    }
+
+    if (message?.type === "save-recorded-preactions") {
+      try {
+        sendResponse(await saveRecordedPreactionsForJob(message.payload ?? {}));
       } catch (error) {
         sendResponse({
           ok: false,

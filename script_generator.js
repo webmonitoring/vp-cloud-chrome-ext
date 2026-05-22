@@ -22,6 +22,8 @@ const elements = {
   startRecordButton: document.querySelector("#start-recording"),
   stopRecordButton: document.querySelector("#stop-recording"),
   useRecordingButton: document.querySelector("#use-recording"),
+  saveAsPreactionsButton: document.querySelector("#save-as-preactions"),
+  useRecordingActionsDiv: document.querySelector("#use-recording-actions"),
   recordingStatus: document.querySelector("#recording-status"),
   recordedActionsList: document.querySelector("#recorded-actions-list"),
 };
@@ -1677,7 +1679,7 @@ function refreshRecordingButtonState() {
   elements.startRecordButton.disabled = state.isRecording || !state.context;
   elements.stopRecordButton.disabled = !state.isRecording;
   elements.startRecordButton.textContent = state.isRecording ? "Recording..." : "Start Recording";
-  elements.useRecordingButton.hidden = state.isRecording || state.recordedActions.length === 0;
+  elements.useRecordingActionsDiv.hidden = state.isRecording || state.recordedActions.length === 0;
 }
 
 function actionLabel(action) {
@@ -1752,6 +1754,38 @@ function convertRecordingToScript(actions) {
   }
 
   return lines.join("\n");
+}
+
+function convertRecordingToPreactions(actions) {
+  const preactions = [];
+
+  for (const action of actions) {
+    if (action.type === "navigate") {
+      preactions.push({ goto: action.url });
+      continue;
+    }
+
+    if (action.type === "click") {
+      preactions.push({ click: action.selector });
+      continue;
+    }
+
+    if (action.type === "setValue") {
+      preactions.push({ type: { field: action.selector, value: action.value } });
+      continue;
+    }
+
+    if (action.type === "setChecked") {
+      const sel = action.selector.replace(/'/g, "\\'");
+      const checked = Boolean(action.checked);
+      preactions.push({
+        script: `(function(){var el=document.querySelector('${sel}');if(el&&el.checked!==${checked}){el.checked=${checked};el.dispatchEvent(new Event('change',{bubbles:true}));}})();`,
+      });
+      continue;
+    }
+  }
+
+  return preactions;
 }
 
 let recordingPollTimer = null;
@@ -1859,6 +1893,34 @@ function handleUseRecording() {
   elements.output.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 
+async function handleSaveAsPreactions() {
+  if (!state.context) {
+    setRecordingStatus("error", "No job context.");
+    return;
+  }
+  const preactions = convertRecordingToPreactions(state.recordedActions);
+  if (!preactions.length) return;
+
+  elements.saveAsPreactionsButton.disabled = true;
+  elements.saveAsPreactionsButton.textContent = "Saving...";
+
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: "save-recorded-preactions",
+      payload: { jobId: state.context.jobId, actions: preactions },
+    });
+
+    if (!response?.ok) throw new Error(response?.error ?? "Failed to save actions.");
+
+    setRecordingStatus("success", `Saved ${preactions.length} action${preactions.length === 1 ? "" : "s"} to job #${state.context.jobId}.`);
+  } catch (error) {
+    setRecordingStatus("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    elements.saveAsPreactionsButton.disabled = false;
+    elements.saveAsPreactionsButton.textContent = "Save as Actions";
+  }
+}
+
 async function initialize() {
   refreshButtonState();
   refreshRecordingButtonState();
@@ -1920,6 +1982,10 @@ elements.stopRecordButton.addEventListener("click", () => {
 
 elements.useRecordingButton.addEventListener("click", () => {
   handleUseRecording();
+});
+
+elements.saveAsPreactionsButton.addEventListener("click", () => {
+  void handleSaveAsPreactions();
 });
 
 void initialize();
