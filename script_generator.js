@@ -1720,15 +1720,20 @@ function convertRecordingToScript(actions) {
   if (!actions.length) return "";
 
   const lines = [];
+  lines.push(`(async function() {`);
+  lines.push(`function wait(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }`);
 
-  for (const action of actions) {
+  for (let i = 0; i < actions.length; i++) {
+    const action = actions[i];
+    if (i > 0) lines.push(`await wait(1000);`);
+
     if (action.type === "navigate") {
       lines.push(`window.location.href = ${JSON.stringify(action.url)};`);
       continue;
     }
 
     if (action.type === "click") {
-      const comment = action.label ? ` // ${action.label}` : "";
+      const comment = action.label ? ` // ${action.label.replace(/[\r\n]+/g, " ")}` : "";
       lines.push(`document.querySelector(${JSON.stringify(action.selector)})?.click();${comment}`);
       continue;
     }
@@ -1736,23 +1741,24 @@ function convertRecordingToScript(actions) {
     if (action.type === "setValue") {
       const sel = JSON.stringify(action.selector);
       const val = JSON.stringify(action.value);
-      const comment = action.label ? ` // ${action.label}` : "";
+      const comment = action.label ? ` // ${action.label.replace(/[\r\n]+/g, " ")}` : "";
       lines.push(`(function() { var el = document.querySelector(${sel});${comment}`);
-      lines.push(`  if (el) { el.value = ${val}; el.dispatchEvent(new Event('input', {bubbles:true})); el.dispatchEvent(new Event('change', {bubbles:true})); }`);
+      lines.push(`if (el) { el.value = ${val}; el.dispatchEvent(new Event('input', {bubbles:true})); el.dispatchEvent(new Event('change', {bubbles:true})); }`);
       lines.push(`})();`);
       continue;
     }
 
     if (action.type === "setChecked") {
       const sel = JSON.stringify(action.selector);
-      const comment = action.label ? ` // ${action.label}` : "";
+      const comment = action.label ? ` // ${action.label.replace(/[\r\n]+/g, " ")}` : "";
       lines.push(`(function() { var el = document.querySelector(${sel});${comment}`);
-      lines.push(`  if (el) { el.checked = ${Boolean(action.checked)}; el.dispatchEvent(new Event('change', {bubbles:true})); }`);
+      lines.push(`if (el) { el.checked = ${Boolean(action.checked)}; el.dispatchEvent(new Event('change', {bubbles:true})); }`);
       lines.push(`})();`);
       continue;
     }
   }
 
+  lines.push(`})();`);
   return lines.join("\n");
 }
 
