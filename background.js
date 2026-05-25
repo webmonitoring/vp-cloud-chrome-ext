@@ -207,6 +207,67 @@ async function isLocalLlmBackend() {
   return (await getLlmSettings()).backend === "local";
 }
 
+// Tabs that currently host the script generator. The side panel is only
+// allowed to show on these tabs — onActivated below disables it everywhere
+// else. Cleaned up when the tab is closed.
+const scriptGeneratorTabs = new Set();
+
+chrome.tabs.onActivated.addListener(async ({ tabId }) => {
+  if (!chrome.sidePanel?.setOptions) return;
+  if (scriptGeneratorTabs.has(tabId)) return; // already enabled per-tab
+  try {
+    await chrome.sidePanel.setOptions({ tabId, enabled: false });
+  } catch (_error) {
+    // Tab may have closed between the activation event and the call.
+  }
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  scriptGeneratorTabs.delete(tabId);
+});
+
+const EDIT_ACTIONS_BRIDGE_ID = "edit-actions-bridge";
+const EDIT_ACTIONS_HOST_MATCHES = Object.freeze({
+  local: ["http://localhost:3000/*"],
+  dev: ["https://dev.visualping.io/*"],
+  prod: ["https://visualping.io/*"],
+});
+
+async function registerEditActionsBridge() {
+  if (!chrome.scripting?.registerContentScripts) return;
+  const env = await getEffectiveBackendEnv();
+  const matches = EDIT_ACTIONS_HOST_MATCHES[env] ?? EDIT_ACTIONS_HOST_MATCHES.prod;
+  const script = {
+    id: EDIT_ACTIONS_BRIDGE_ID,
+    matches,
+    js: ["content/edit-actions-bridge.js"],
+    // document_idle (not document_start) so we don't mutate <html> before
+    // React hydrates — that triggers Next.js "Extra attributes from the server"
+    // warnings. The page-side useEffect listens for visualping:extension-ready,
+    // so detection still works even when the marker lands after mount.
+    runAt: "document_idle",
+    allFrames: false,
+    persistAcrossSessions: true,
+  };
+  try {
+    const existing = await chrome.scripting.getRegisteredContentScripts({
+      ids: [EDIT_ACTIONS_BRIDGE_ID],
+    });
+    if (existing.length) {
+      await chrome.scripting.unregisterContentScripts({ ids: [EDIT_ACTIONS_BRIDGE_ID] });
+    }
+    await chrome.scripting.registerContentScripts([script]);
+  } catch (error) {
+    console.warn("Could not register edit-actions-bridge content script.", error);
+  }
+}
+
+// Register at module load so the SW startup re-establishes the right host
+// scope when backendEnv changes between sessions.
+registerEditActionsBridge().catch((error) => {
+  console.warn("registerEditActionsBridge failed during init.", error);
+});
+
 async function closeGemmaOffscreenIfLoaded() {
   try {
     if (chrome.offscreen?.hasDocument && (await chrome.offscreen.hasDocument())) {
@@ -365,7 +426,9 @@ function scriptGeneratorContextKey(tabId) {
 
 function buildScriptGeneratorPanelPath(context) {
   const params = new URLSearchParams();
-  params.set("jobId", String(context.jobId));
+  if (Number.isInteger(Number(context.jobId)) && Number(context.jobId) > 0) {
+    params.set("jobId", String(context.jobId));
+  }
   params.set("url", String(context.url));
 
   if (context.description) {
@@ -374,6 +437,10 @@ function buildScriptGeneratorPanelPath(context) {
 
   if (Number.isInteger(Number(context.tabId)) && Number(context.tabId) > 0) {
     params.set("tabId", String(context.tabId));
+  }
+
+  if (Number.isInteger(Number(context.sourceTabId)) && Number(context.sourceTabId) > 0) {
+    params.set("sourceTabId", String(context.sourceTabId));
   }
 
   return `script_generator.html?${params.toString()}`;
@@ -2212,11 +2279,30 @@ async function syncCookiesForJob(accountKey, jobId) {
   }, accountKey);
 }
 
-async function openScriptGeneratorForJob(payload = {}) {
-  const jobId = Number(payload.jobId);
-  if (!Number.isInteger(jobId) || jobId <= 0) {
-    throw new Error("A valid Visualping job id is required.");
+async function openScriptGeneratorFromPage(payload = {}, sender = {}) {
+  const raw = String(payload.url ?? "").trim();
+  const url = /^https?:\/\//i.test(raw) ? raw : raw ? `https://${raw}` : "";
+  if (!isSupportedTabUrl(url)) {
+    throw new Error("A valid http:// or https:// URL is required.");
   }
+
+  const senderWindowId = Number(sender?.tab?.windowId);
+  const windowId = Number.isInteger(senderWindowId) && senderWindowId >= 0 ? senderWindowId : undefined;
+  const senderTabId = Number(sender?.tab?.id);
+  const sourceTabId = Number.isInteger(senderTabId) && senderTabId > 0 ? senderTabId : undefined;
+
+  return openScriptGeneratorForJob({
+    url,
+    description: "",
+    windowId,
+    sourceTabId,
+    openPanel: true,
+  });
+}
+
+async function openScriptGeneratorForJob(payload = {}) {
+  const jobIdRaw = Number(payload.jobId);
+  const jobId = Number.isInteger(jobIdRaw) && jobIdRaw > 0 ? jobIdRaw : null;
 
   const url = String(payload.url ?? "").trim();
   if (!isSupportedTabUrl(url)) {
@@ -2281,6 +2367,8 @@ async function openScriptGeneratorForJob(payload = {}) {
     }
   }
 
+  const sourceTabIdRaw = Number(payload.sourceTabId);
+  const sourceTabId = Number.isInteger(sourceTabIdRaw) && sourceTabIdRaw > 0 ? sourceTabIdRaw : null;
   const context = {
     jobId,
     url,
@@ -2288,6 +2376,7 @@ async function openScriptGeneratorForJob(payload = {}) {
     openedAt: new Date().toISOString(),
     tabId: tab.id,
     windowId: tab.windowId ?? null,
+    sourceTabId,
   };
   const panelPath = buildScriptGeneratorPanelPath(context);
 
@@ -2298,6 +2387,8 @@ async function openScriptGeneratorForJob(payload = {}) {
     enabled: true,
     path: panelPath,
   });
+  // Track this tab so the onActivated listener doesn't disable it.
+  scriptGeneratorTabs.add(tab.id);
 
   if (Number.isInteger(tab.windowId)) {
     try {
@@ -2651,6 +2742,24 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // For the "open from page" flow we must fire chrome.sidePanel.open
+  // synchronously at the very top of the listener — that's the only moment
+  // the user-gesture state propagated from the page click is still valid.
+  // Doing it inside the async IIFE below is too late: tabs.create + setOptions
+  // awaits eat the gesture window and sidePanel.open then fails silently.
+  if (
+    message?.type === "open-script-generator-from-page" &&
+    chrome.sidePanel?.open &&
+    Number.isInteger(sender?.tab?.windowId) &&
+    sender.tab.windowId >= 0
+  ) {
+    chrome.sidePanel
+      .open({ windowId: sender.tab.windowId })
+      .catch((error) => {
+        console.warn("sidePanel.open (from page) failed:", error);
+      });
+  }
+
   (async () => {
     if (message?.target === "gemma-background") {
       if (message.type === "gemma-model-progress") {
@@ -2781,6 +2890,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const requestedEnv = normalizeBackendEnv(message?.payload?.backendEnv);
         await setStoredBackendEnv(requestedEnv);
         await getPublicConfig({ forceRefresh: true });
+        await registerEditActionsBridge();
         sendResponse({
           ok: true,
           backendEnv: requestedEnv,
@@ -2905,6 +3015,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return;
     }
 
+    if (message?.type === "open-script-generator-from-page") {
+      try {
+        sendResponse(
+          await openScriptGeneratorFromPage(message.payload ?? {}, sender),
+        );
+      } catch (error) {
+        sendResponse({
+          ok: false,
+          error: formatError(error),
+        });
+      }
+      return;
+    }
+
     if (message?.type === "script-generator-context") {
       try {
         sendResponse(await getScriptGeneratorContextForTab(message.payload ?? {}));
@@ -2932,6 +3056,55 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message?.type === "save-recorded-preactions") {
       try {
         sendResponse(await saveRecordedPreactionsForJob(message.payload ?? {}));
+      } catch (error) {
+        sendResponse({
+          ok: false,
+          error: formatError(error),
+        });
+      }
+      return;
+    }
+
+    if (message?.type === "post-actions-to-source-tab") {
+      try {
+        const sourceTabId = Number(message?.payload?.sourceTabId);
+        const scriptGenTabIdRaw = Number(message?.payload?.scriptGenTabId);
+        const scriptGenTabId = Number.isInteger(scriptGenTabIdRaw) && scriptGenTabIdRaw > 0
+          ? scriptGenTabIdRaw
+          : Number.isInteger(sender?.tab?.id) ? sender.tab.id : null;
+        const script = String(message?.payload?.script ?? "").trim();
+        const actions = Array.isArray(message?.payload?.actions)
+          ? message.payload.actions
+          : null;
+        if (!Number.isInteger(sourceTabId) || sourceTabId <= 0) {
+          throw new Error("Missing source tab id.");
+        }
+        if (!script && (!actions || actions.length === 0)) {
+          throw new Error("Nothing to send: no script and no actions.");
+        }
+        const payload = {};
+        if (script) payload.script = script;
+        if (actions && actions.length > 0) payload.actions = actions;
+        await chrome.tabs.sendMessage(sourceTabId, {
+          type: "visualping:actions-from-extension",
+          payload,
+        });
+        // Switch back to the source (job editor) tab; closing the script-gen
+        // tab afterwards auto-hides the side panel.
+        try {
+          await chrome.tabs.update(sourceTabId, { active: true });
+        } catch (_error) {
+          // Tab may have closed.
+        }
+        if (Number.isInteger(scriptGenTabId) && scriptGenTabId > 0) {
+          scriptGeneratorTabs.delete(scriptGenTabId);
+          try {
+            await chrome.tabs.remove(scriptGenTabId);
+          } catch (_error) {
+            // Tab may already be gone.
+          }
+        }
+        sendResponse({ ok: true });
       } catch (error) {
         sendResponse({
           ok: false,

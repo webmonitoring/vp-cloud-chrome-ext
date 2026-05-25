@@ -112,7 +112,8 @@ function updateContextText() {
     return;
   }
 
-  elements.jobContext.textContent = `Job #${state.context.jobId} | ${state.context.url}`;
+  const label = state.context.jobId ? `Job #${state.context.jobId}` : "Visualping job editor";
+  elements.jobContext.textContent = `${label} | ${state.context.url}`;
 }
 
 function getContextFromLocation() {
@@ -121,16 +122,18 @@ function getContextFromLocation() {
   const url = String(params.get("url") ?? "").trim();
   const description = String(params.get("description") ?? "").trim();
   const tabId = Number(params.get("tabId"));
+  const sourceTabId = Number(params.get("sourceTabId"));
 
-  if (!Number.isInteger(jobId) || jobId <= 0 || !url) {
+  if (!url) {
     return null;
   }
 
   return {
-    jobId,
+    jobId: Number.isInteger(jobId) && jobId > 0 ? jobId : null,
     url,
     description,
     tabId: Number.isInteger(tabId) && tabId > 0 ? tabId : null,
+    sourceTabId: Number.isInteger(sourceTabId) && sourceTabId > 0 ? sourceTabId : null,
   };
 }
 
@@ -1646,19 +1649,42 @@ async function handleSave() {
   refreshButtonState();
 
   try {
-    const response = await chrome.runtime.sendMessage({
-      type: "save-script-action",
-      payload: {
-        jobId: state.context.jobId,
-        script: state.generatedScript,
-      },
-    });
+    const sourceTabId = Number(state.context.sourceTabId);
+    const launchedFromPage = Number.isInteger(sourceTabId) && sourceTabId > 0;
+
+    let response;
+    if (launchedFromPage) {
+      response = await chrome.runtime.sendMessage({
+        type: "post-actions-to-source-tab",
+        payload: {
+          sourceTabId,
+          scriptGenTabId: state.context.tabId ?? null,
+          script: state.generatedScript,
+        },
+      });
+    } else {
+      if (!state.context.jobId) {
+        throw new Error("No Visualping job context available to save into.");
+      }
+      response = await chrome.runtime.sendMessage({
+        type: "save-script-action",
+        payload: {
+          jobId: state.context.jobId,
+          script: state.generatedScript,
+        },
+      });
+    }
 
     if (!response?.ok) {
       throw new Error(response?.error ?? "Failed to save script action.");
     }
 
-    setStatus("success", `Saved script action to job #${state.context.jobId}.`);
+    setStatus(
+      "success",
+      launchedFromPage
+        ? "Sent script back to Visualping job editor."
+        : `Saved script action to job #${state.context.jobId}.`,
+    );
   } catch (error) {
     setStatus("error", error instanceof Error ? error.message : String(error));
   } finally {
@@ -1911,14 +1937,37 @@ async function handleSaveAsPreactions() {
   elements.saveAsPreactionsButton.textContent = "Saving...";
 
   try {
-    const response = await chrome.runtime.sendMessage({
-      type: "save-recorded-preactions",
-      payload: { jobId: state.context.jobId, actions: preactions },
-    });
+    const sourceTabId = Number(state.context.sourceTabId);
+    const launchedFromPage = Number.isInteger(sourceTabId) && sourceTabId > 0;
+
+    let response;
+    if (launchedFromPage) {
+      response = await chrome.runtime.sendMessage({
+        type: "post-actions-to-source-tab",
+        payload: {
+          sourceTabId,
+          scriptGenTabId: state.context.tabId ?? null,
+          actions: preactions,
+        },
+      });
+    } else {
+      if (!state.context.jobId) {
+        throw new Error("No Visualping job context available to save into.");
+      }
+      response = await chrome.runtime.sendMessage({
+        type: "save-recorded-preactions",
+        payload: { jobId: state.context.jobId, actions: preactions },
+      });
+    }
 
     if (!response?.ok) throw new Error(response?.error ?? "Failed to save actions.");
 
-    setRecordingStatus("success", `Saved ${preactions.length} action${preactions.length === 1 ? "" : "s"} to job #${state.context.jobId}.`);
+    setRecordingStatus(
+      "success",
+      launchedFromPage
+        ? `Sent ${preactions.length} action${preactions.length === 1 ? "" : "s"} back to Visualping job editor.`
+        : `Saved ${preactions.length} action${preactions.length === 1 ? "" : "s"} to job #${state.context.jobId}.`,
+    );
   } catch (error) {
     setRecordingStatus("error", error instanceof Error ? error.message : String(error));
   } finally {
