@@ -214,11 +214,25 @@ const scriptGeneratorTabs = new Set();
 
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
   if (!chrome.sidePanel?.setOptions) return;
-  if (scriptGeneratorTabs.has(tabId)) return; // already enabled per-tab
-  try {
-    await chrome.sidePanel.setOptions({ tabId, enabled: false });
-  } catch (_error) {
-    // Tab may have closed between the activation event and the call.
+  // The Set is just a fast in-memory cache; the source of truth is the
+  // per-tab context in storage.session, which survives SW restarts.
+  let isRecordingTab = scriptGeneratorTabs.has(tabId);
+  if (!isRecordingTab) {
+    const context = await getScriptGeneratorContext(tabId);
+    if (context) {
+      scriptGeneratorTabs.add(tabId);
+      isRecordingTab = true;
+    }
+  }
+  if (isRecordingTab && chrome.sidePanel.open) {
+    // Returning to a recording tab — Chrome closes the panel when the user
+    // visits a tab with enabled=false, so re-open it here. The user's tab
+    // click is the required gesture.
+    try {
+      await chrome.sidePanel.open({ tabId });
+    } catch (_error) {
+      // No-op: gesture may be unavailable (e.g. activation from background).
+    }
   }
 });
 
@@ -621,48 +635,21 @@ async function syncScriptGeneratorPanelForTab(tabId) {
   }
 
   let activeTab = null;
-  let tabsInWindow = [];
   try {
     activeTab = await chrome.tabs.get(tabId);
-    if (Number.isInteger(activeTab?.windowId) && activeTab.windowId >= 0) {
-      tabsInWindow = await chrome.tabs.query({
-        windowId: activeTab.windowId,
-      });
-    }
   } catch (_error) {
     // Best effort only.
-  }
-
-  const otherTabIds = tabsInWindow
-    .map((tab) => Number(tab?.id))
-    .filter((otherTabId) => Number.isInteger(otherTabId) && otherTabId > 0 && otherTabId !== tabId);
-
-  if (otherTabIds.length) {
-    await Promise.all(
-      otherTabIds.map(async (otherTabId) => {
-        try {
-          await chrome.sidePanel.setOptions({
-            tabId: otherTabId,
-            enabled: false,
-          });
-        } catch (_error) {
-          // Best effort only.
-        }
-      })
-    );
   }
 
   const context = await getScriptGeneratorContext(tabId);
 
   if (!context) {
-    try {
-      await chrome.sidePanel.setOptions({
-        tabId,
-        enabled: false,
-      });
-    } catch (_error) {
-      // Best effort only.
-    }
+    // Don't disable here — the activated tab might be a normal browsing tab
+    // (such as the dashboard that just dispatched a Record Actions click).
+    // The dedicated onActivated handler at the top of this file is the
+    // single place that decides whether to disable non-recording tabs, and
+    // it runs after our sync sidePanel.open has had its chance to consume
+    // the user gesture.
     return;
   }
 
@@ -2747,14 +2734,30 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // the user-gesture state propagated from the page click is still valid.
   // Doing it inside the async IIFE below is too late: tabs.create + setOptions
   // awaits eat the gesture window and sidePanel.open then fails silently.
+  //
+  // Open with {tabId} (not {windowId}) so the panel is tab-scoped — that's
+  // what makes per-tab `enabled:false` on other tabs actually hide the
+  // sidebar when the user switches tabs. Window-scoped panels ignore per-tab
+  // options. We open against the SENDER tab here (the dashboard) and the
+  // async handler then transfers panel ownership to the new recording tab.
   if (
     message?.type === "open-script-generator-from-page" &&
     chrome.sidePanel?.open &&
+    chrome.sidePanel?.setOptions &&
+    Number.isInteger(sender?.tab?.id) &&
+    sender.tab.id > 0 &&
     Number.isInteger(sender?.tab?.windowId) &&
     sender.tab.windowId >= 0
   ) {
+    // Tab-scoped open ({tabId, windowId}) so per-tab `enabled:false` on
+    // other tabs hides the sidebar when the user switches away. The sender
+    // tab may have been disabled by a previous Record Actions cleanup;
+    // re-enable it synchronously before opening so open() doesn't no-op.
+    // Both API calls fire without awaiting so the user-activation window
+    // stays open for sidePanel.open; Chrome processes the IPC calls in
+    // dispatch order, so setOptions lands before open.
     chrome.sidePanel
-      .open({ windowId: sender.tab.windowId })
+      .open({ tabId: sender.tab.id, windowId: sender.tab.windowId })
       .catch((error) => {
         console.warn("sidePanel.open (from page) failed:", error);
       });
