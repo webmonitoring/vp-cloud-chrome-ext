@@ -1,6 +1,49 @@
 if (!window.__vpRecorderInstalled) {
   window.__vpRecorderInstalled = true;
 
+  function isUnique(selector) {
+    try {
+      return document.querySelectorAll(selector).length === 1;
+    } catch {
+      return false;
+    }
+  }
+
+  function segmentFor(el) {
+    const tag = el.tagName.toLowerCase();
+    if (el.id) return `#${CSS.escape(el.id)}`;
+    const siblings = el.parentElement
+      ? [...el.parentElement.children].filter((c) => c.tagName === el.tagName)
+      : [];
+    if (siblings.length > 1) {
+      const n = siblings.indexOf(el) + 1;
+      return `${tag}:nth-of-type(${n})`;
+    }
+    return tag;
+  }
+
+  function getUniqueSelector(selector, el) {
+    if (isUnique(selector)) return selector;
+
+    // Walk up building a path until the selector is unique
+    const segments = [segmentFor(el)];
+    let node = el.parentElement;
+    while (node && node !== document.documentElement) {
+      segments.unshift(segmentFor(node));
+      const path = segments.join(" > ");
+      if (isUnique(path)) return path;
+      if (node.id) break; // id anchor reached, no point going higher
+      node = node.parentElement;
+    }
+
+    // Last resort: document-level index among all matching elements
+    const all = [...document.querySelectorAll(el.tagName.toLowerCase())];
+    const n = all.indexOf(el);
+    if (n >= 0) return `${el.tagName.toLowerCase()}:nth-of-type(${n + 1})`;
+
+    return selector;
+  }
+
   function pickSelector(el) {
     if (!el || !(el instanceof Element)) return null;
 
@@ -9,22 +52,26 @@ if (!window.__vpRecorderInstalled) {
     const stableAttrs = ["data-testid", "data-test", "data-qa", "data-id", "name", "aria-label"];
     for (const attr of stableAttrs) {
       const value = el.getAttribute(attr);
-      if (value) return `${el.tagName.toLowerCase()}[${attr}="${value.replaceAll('"', '\\"')}"]`;
+      if (value) {
+        const sel = `${el.tagName.toLowerCase()}[${attr}="${value.replaceAll('"', '\\"')}"]`;
+        return getUniqueSelector(sel, el);
+      }
     }
 
     const type = el.getAttribute("type");
     if (type && el.tagName === "INPUT") {
       const name = el.getAttribute("name");
       if (name) return `input[type="${type}"][name="${name.replaceAll('"', '\\"')}"]`;
-      return `input[type="${type}"]`;
+      return getUniqueSelector(`input[type="${type}"]`, el);
     }
 
     const classes = [...el.classList].slice(0, 2);
     if (classes.length > 0) {
-      return `${el.tagName.toLowerCase()}${classes.map((c) => `.${CSS.escape(c)}`).join("")}`;
+      const sel = `${el.tagName.toLowerCase()}${classes.map((c) => `.${CSS.escape(c)}`).join("")}`;
+      return getUniqueSelector(sel, el);
     }
 
-    return el.tagName.toLowerCase();
+    return getUniqueSelector(el.tagName.toLowerCase(), el);
   }
 
   function getLabelText(el) {
