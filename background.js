@@ -2750,12 +2750,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sender.tab.windowId >= 0
   ) {
     // Tab-scoped open ({tabId, windowId}) so per-tab `enabled:false` on
-    // other tabs hides the sidebar when the user switches away. The sender
-    // tab may have been disabled by a previous Record Actions cleanup;
-    // re-enable it synchronously before opening so open() doesn't no-op.
-    // Both API calls fire without awaiting so the user-activation window
-    // stays open for sidePanel.open; Chrome processes the IPC calls in
-    // dispatch order, so setOptions lands before open.
+    // other tabs hides the sidebar when the user switches away. If a
+    // previous recording's save flow disabled the sender tab, re-enable it
+    // here so open() doesn't no-op. Both API calls are fired without
+    // awaiting — Chrome processes IPC calls in dispatch order, so the
+    // setOptions update lands before the open is processed, and we stay
+    // inside the user-activation window for the open.
+    chrome.sidePanel
+      .setOptions({
+        tabId: sender.tab.id,
+        enabled: true,
+        path: "script_generator.html",
+      })
+      .catch(() => {});
     chrome.sidePanel
       .open({ tabId: sender.tab.id, windowId: sender.tab.windowId })
       .catch((error) => {
@@ -3092,8 +3099,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           type: "visualping:actions-from-extension",
           payload,
         });
-        // Switch back to the source (job editor) tab; closing the script-gen
-        // tab afterwards auto-hides the side panel.
+        // Disable the side panel on the source tab BEFORE activating it so
+        // Chrome closes the sidebar when the user lands back on the
+        // dashboard. The next Record Actions click re-enables the sender
+        // tab synchronously in onMessage.
+        if (chrome.sidePanel?.setOptions) {
+          try {
+            await chrome.sidePanel.setOptions({
+              tabId: sourceTabId,
+              enabled: false,
+            });
+          } catch (_error) {
+            // Best effort only.
+          }
+        }
         try {
           await chrome.tabs.update(sourceTabId, { active: true });
         } catch (_error) {
