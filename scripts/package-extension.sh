@@ -18,6 +18,7 @@ zip -r "$ZIP_PATH" \
   popup.html popup.js popup.css \
   script_generator.html script_generator.js script_generator.css \
   recorder.js \
+  content \
   icons \
   lib \
   -x "lib/gemma/engine-source.js"
