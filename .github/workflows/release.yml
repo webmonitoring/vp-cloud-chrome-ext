@@ -1,0 +1,94 @@
+name: Release Extension
+
+# Manual release: bump the version in manifest.json, merge to develop, then
+# run this workflow from the Actions tab. It packages the extension, tags
+# the commit, attaches the zip to a GitHub Release, and uploads (optionally
+# publishes) the build to the Chrome Web Store.
+#
+# Required repo secrets for the Chrome Web Store step:
+#   CWS_EXTENSION_ID      — the extension's ID on the Web Store
+#   CWS_CLIENT_ID         — OAuth client ID with chromewebstore scope
+#   CWS_CLIENT_SECRET     — matching client secret
+#   CWS_REFRESH_TOKEN     — long-lived refresh token for the publisher account
+# See https://github.com/fregante/chrome-webstore-upload-cli#authentication
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_cws:
+        description: "Publish on the Chrome Web Store (uncheck to upload as a draft)"
+        type: boolean
+        default: true
+      prerelease:
+        description: "Mark the GitHub Release as pre-release"
+        type: boolean
+        default: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # for tag push + GitHub Release creation
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need history so the tag check below sees existing tags
+
+      - name: Read manifest version
+        id: ver
+        run: |
+          VERSION=$(awk -F'"' '/"version"[[:space:]]*:/ { print $4; exit }' manifest.json)
+          if [[ -z "$VERSION" ]]; then
+            echo "::error::Could not parse version from manifest.json"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION"    >> "$GITHUB_OUTPUT"
+          echo "zip=dist/vp-cloud-chrome-ext-$VERSION.zip" >> "$GITHUB_OUTPUT"
+
+      - name: Verify tag does not already exist
+        run: |
+          if git rev-parse -q --verify "refs/tags/${{ steps.ver.outputs.tag }}" >/dev/null; then
+            echo "::error::Tag ${{ steps.ver.outputs.tag }} already exists. Bump manifest.json before releasing."
+            exit 1
+          fi
+
+      - name: Package extension
+        run: bash scripts/package-extension.sh
+
+      - name: Create and push tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.ver.outputs.tag }}" -m "Release ${{ steps.ver.outputs.tag }}"
+          git push origin "${{ steps.ver.outputs.tag }}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ${{ steps.ver.outputs.tag }}
+          prerelease: ${{ inputs.prerelease }}
+          generate_release_notes: true
+          files: ${{ steps.ver.outputs.zip }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Upload to Chrome Web Store
+        env:
+          CWS_EXTENSION_ID:  ${{ secrets.CWS_EXTENSION_ID }}
+          CWS_CLIENT_ID:     ${{ secrets.CWS_CLIENT_ID }}
+          CWS_CLIENT_SECRET: ${{ secrets.CWS_CLIENT_SECRET }}
+          CWS_REFRESH_TOKEN: ${{ secrets.CWS_REFRESH_TOKEN }}
+        run: |
+          npx --yes chrome-webstore-upload-cli@3 upload \
+            --source "${{ steps.ver.outputs.zip }}" \
+            ${{ inputs.publish_cws && '--auto-publish' || '' }} \
+            --extension-id "$CWS_EXTENSION_ID" \
+            --client-id "$CWS_CLIENT_ID" \
+            --client-secret "$CWS_CLIENT_SECRET" \
+            --refresh-token "$CWS_REFRESH_TOKEN"
