@@ -224,15 +224,31 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
       isRecordingTab = true;
     }
   }
-  if (isRecordingTab && chrome.sidePanel.open) {
+  if (isRecordingTab) {
     // Returning to a recording tab — Chrome closes the panel when the user
     // visits a tab with enabled=false, so re-open it here. The user's tab
     // click is the required gesture.
-    try {
-      await chrome.sidePanel.open({ tabId });
-    } catch (_error) {
-      // No-op: gesture may be unavailable (e.g. activation from background).
+    if (chrome.sidePanel.open) {
+      try {
+        await chrome.sidePanel.open({ tabId });
+      } catch (_error) {
+        // No-op: gesture may be unavailable (e.g. activation from background).
+      }
     }
+    return;
+  }
+  // Hide the sidebar on tabs that aren't part of an active recording. Without
+  // this, Chrome keeps the panel visible across tab switches (falling back to
+  // the manifest default path). We only disable when at least one recording
+  // exists — disabling pre-emptively would break the Record Actions click
+  // because the sender tab needs to be enabled at gesture time. The sync
+  // setOptions/open pair in the onMessage handler re-enables the sender on
+  // the next click before opening.
+  if (scriptGeneratorTabs.size === 0) return;
+  try {
+    await chrome.sidePanel.setOptions({ tabId, enabled: false });
+  } catch (_error) {
+    // Tab may have closed between the activation event and the call.
   }
 });
 
