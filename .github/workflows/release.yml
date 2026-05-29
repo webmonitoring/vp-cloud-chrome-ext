@@ -38,7 +38,7 @@ jobs:
       contents: write   # for tag push + GitHub Release creation
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0   # need history so the tag check below sees existing tags
 
@@ -72,7 +72,7 @@ jobs:
           git push origin "${{ steps.ver.outputs.tag }}"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
           name: ${{ steps.ver.outputs.tag }}
@@ -81,7 +81,7 @@ jobs:
           files: ${{ steps.ver.outputs.zip }}
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "20"
 
