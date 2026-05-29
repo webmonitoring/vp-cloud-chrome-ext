@@ -16,9 +16,16 @@ on:
   workflow_dispatch:
     inputs:
       publish_cws:
-        description: "Publish on the Chrome Web Store (uncheck to upload as a draft)"
+        description: "Publish on the Chrome Web Store after upload (uncheck to upload a draft only)"
         type: boolean
         default: true
+      publish_target:
+        description: "Publish audience — trustedTesters keeps the limited rollout; public targets the public listing"
+        type: choice
+        options:
+          - trustedTesters
+          - public
+        default: trustedTesters
       prerelease:
         description: "Mark the GitHub Release as pre-release"
         type: boolean
@@ -87,7 +94,25 @@ jobs:
         run: |
           npx --yes chrome-webstore-upload-cli@3 upload \
             --source "${{ steps.ver.outputs.zip }}" \
-            ${{ inputs.publish_cws && '--auto-publish' || '' }} \
+            --extension-id "$CWS_EXTENSION_ID" \
+            --client-id "$CWS_CLIENT_ID" \
+            --client-secret "$CWS_CLIENT_SECRET" \
+            --refresh-token "$CWS_REFRESH_TOKEN"
+
+      # Publish targets the same audience the item is already distributed to.
+      # The default channel ("public") is only valid once the item has a public
+      # listing; for a Trusted Testers rollout, --trusted-testers is required —
+      # otherwise the API rejects the publish as a distribution-visibility change.
+      - name: Publish on Chrome Web Store
+        if: ${{ inputs.publish_cws }}
+        env:
+          CWS_EXTENSION_ID:  ${{ secrets.CWS_EXTENSION_ID }}
+          CWS_CLIENT_ID:     ${{ secrets.CWS_CLIENT_ID }}
+          CWS_CLIENT_SECRET: ${{ secrets.CWS_CLIENT_SECRET }}
+          CWS_REFRESH_TOKEN: ${{ secrets.CWS_REFRESH_TOKEN }}
+        run: |
+          npx --yes chrome-webstore-upload-cli@3 publish \
+            ${{ inputs.publish_target == 'trustedTesters' && '--trusted-testers' || '' }} \
             --extension-id "$CWS_EXTENSION_ID" \
             --client-id "$CWS_CLIENT_ID" \
             --client-secret "$CWS_CLIENT_SECRET" \
