@@ -44,34 +44,82 @@ if (!window.__vpRecorderInstalled) {
     return selector;
   }
 
-  function pickSelector(el) {
+  function nthTagSelector(el) {
+    const tag = el.tagName.toLowerCase();
+    if (tag !== "select" && tag !== "input" && tag !== "textarea") return null;
+    const all = [...document.querySelectorAll(tag)];
+    const n = all.indexOf(el);
+    if (n < 0) return null;
+    return `(//${tag})[${n + 1}]`;
+  }
+
+  function xpathSelector(el) {
+    const tag = el.tagName.toLowerCase();
+    const text = el.textContent?.trim();
+    if (text && text.length <= 80 && !text.includes('"')) {
+      if (tag === "button" || tag === "a" || tag === "label") {
+        return `xpath/.//${tag}[normalize-space(.)="${text}"]`;
+      }
+    }
+    const ariaLabel = el.getAttribute("aria-label");
+    if (ariaLabel && !ariaLabel.includes('"')) {
+      return `xpath/.//${tag}[@aria-label="${ariaLabel}"]`;
+    }
+    return null;
+  }
+
+  function pickSelectors(el) {
     if (!el || !(el instanceof Element)) return null;
 
-    if (el.id) return `#${CSS.escape(el.id)}`;
+    const candidates = [];
 
-    const stableAttrs = ["data-testid", "data-test", "data-qa", "data-id", "name", "aria-label"];
+    const add = (sel) => {
+      if (sel && !candidates.includes(sel)) candidates.push(sel);
+    };
+
+    if (el.id) add(`#${CSS.escape(el.id)}`);
+
+    const stableAttrs = ["data-testid", "data-test", "data-qa", "data-id"];
     for (const attr of stableAttrs) {
       const value = el.getAttribute(attr);
       if (value) {
-        const sel = `${el.tagName.toLowerCase()}[${attr}="${value.replaceAll('"', '\\"')}"]`;
-        return getUniqueSelector(sel, el);
+        add(getUniqueSelector(`${el.tagName.toLowerCase()}[${attr}="${value.replaceAll('"', '\\"')}"]`, el));
       }
+    }
+
+    const ariaLabel = el.getAttribute("aria-label");
+    if (ariaLabel) {
+      add(getUniqueSelector(`${el.tagName.toLowerCase()}[aria-label="${ariaLabel.replaceAll('"', '\\"')}"]`, el));
+    }
+
+    const name = el.getAttribute("name");
+    if (name) {
+      add(getUniqueSelector(`${el.tagName.toLowerCase()}[name="${name.replaceAll('"', '\\"')}"]`, el));
     }
 
     const type = el.getAttribute("type");
     if (type && el.tagName === "INPUT") {
-      const name = el.getAttribute("name");
-      if (name) return `input[type="${type}"][name="${name.replaceAll('"', '\\"')}"]`;
-      return getUniqueSelector(`input[type="${type}"]`, el);
+      if (name) {
+        add(`input[type="${type}"][name="${name.replaceAll('"', '\\"')}"]`);
+      } else {
+        add(getUniqueSelector(`input[type="${type}"]`, el));
+      }
     }
+
+    const xpath = xpathSelector(el);
+    if (xpath) add(xpath);
+
+    const nthTag = nthTagSelector(el);
+    if (nthTag) add(nthTag);
 
     const classes = [...el.classList].slice(0, 2);
     if (classes.length > 0) {
-      const sel = `${el.tagName.toLowerCase()}${classes.map((c) => `.${CSS.escape(c)}`).join("")}`;
-      return getUniqueSelector(sel, el);
+      add(getUniqueSelector(`${el.tagName.toLowerCase()}${classes.map((c) => `.${CSS.escape(c)}`).join("")}`, el));
     }
 
-    return getUniqueSelector(el.tagName.toLowerCase(), el);
+    add(getUniqueSelector(el.tagName.toLowerCase(), el));
+
+    return candidates.length > 0 ? candidates : null;
   }
 
   function getLabelText(el) {
@@ -112,9 +160,11 @@ if (!window.__vpRecorderInstalled) {
 
       if (tag === "input" || tag === "textarea" || tag === "select") {
         if (inputType === "checkbox" || inputType === "radio") {
+          const selectors = pickSelectors(el);
+          if (!selectors) return;
           sendAction({
             type: "setChecked",
-            selector: pickSelector(el),
+            selectors,
             checked: el.checked,
             label: getLabelText(el),
             timestamp: Date.now(),
@@ -123,12 +173,12 @@ if (!window.__vpRecorderInstalled) {
         return;
       }
 
-      const selector = pickSelector(el);
-      if (!selector) return;
+      const selectors = pickSelectors(el);
+      if (!selectors) return;
 
       sendAction({
         type: "click",
-        selector,
+        selectors,
         label: getLabelText(el),
         timestamp: Date.now(),
       });
@@ -167,12 +217,12 @@ if (!window.__vpRecorderInstalled) {
       const oldValue = preFocusValues.get(el);
       if (newValue === oldValue) return;
 
-      const selector = pickSelector(el);
-      if (!selector) return;
+      const selectors = pickSelectors(el);
+      if (!selectors) return;
 
       sendAction({
         type: "setValue",
-        selector,
+        selectors,
         value: newValue,
         label: getLabelText(el),
         timestamp: Date.now(),
@@ -189,14 +239,14 @@ if (!window.__vpRecorderInstalled) {
       if (!el || !(el instanceof Element)) return;
       if (el.tagName.toLowerCase() !== "select") return;
 
-      const selector = pickSelector(el);
-      if (!selector) return;
+      const selectors = pickSelectors(el);
+      if (!selectors) return;
 
       const selectedOption = el.options[el.selectedIndex];
 
       sendAction({
-        type: "setValue",
-        selector,
+        type: "selectValue",
+        selectors,
         value: el.value,
         label: selectedOption?.text?.trim().slice(0, 80) || getLabelText(el),
         timestamp: Date.now(),

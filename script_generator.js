@@ -1708,14 +1708,22 @@ function refreshRecordingButtonState() {
   elements.useRecordingActionsDiv.hidden = state.isRecording || state.recordedActions.length === 0;
 }
 
+function primarySelector(action) {
+  if (Array.isArray(action.selectors)) return action.selectors[0] ?? "";
+  return action.selector ?? "";
+}
+
 function actionLabel(action) {
+  const sel = primarySelector(action);
   switch (action.type) {
     case "click":
-      return `Click${action.label ? ` "${action.label}"` : ""}  (${action.selector})`;
+      return `Click${action.label ? ` "${action.label}"` : ""}  (${sel})`;
     case "setValue":
-      return `Type "${action.value}"${action.label ? ` into "${action.label}"` : ""}  (${action.selector})`;
+      return `Type "${action.value}"${action.label ? ` into "${action.label}"` : ""}  (${sel})`;
+    case "selectValue":
+      return `Select "${action.value}"${action.label ? ` ("${action.label}")` : ""}  (${sel})`;
     case "setChecked":
-      return `${action.checked ? "Check" : "Uncheck"}${action.label ? ` "${action.label}"` : ""}  (${action.selector})`;
+      return `${action.checked ? "Check" : "Uncheck"}${action.label ? ` "${action.label}"` : ""}  (${sel})`;
     case "navigate":
       return `Navigate to ${action.url}`;
     default:
@@ -1742,6 +1750,11 @@ function renderRecordedActions() {
   list.scrollTop = list.scrollHeight;
 }
 
+function resolveSelectorsSnippet(selectors) {
+  const list = JSON.stringify(selectors);
+  return `(function(){var ss=${list};for(var i=0;i<ss.length;i++){try{var e=document.querySelector(ss[i]);if(e)return e;}catch(e){}}return null;})()`;
+}
+
 function convertRecordingToScript(actions) {
   if (!actions.length) return "";
 
@@ -1758,26 +1771,37 @@ function convertRecordingToScript(actions) {
       continue;
     }
 
+    const selectors = Array.isArray(action.selectors)
+      ? action.selectors.filter((s) => !/^(xpath\/|aria\/|pierce\/|text\/|\(\/\/)/.test(s))
+      : [action.selector].filter(Boolean);
+
     if (action.type === "click") {
       const comment = action.label ? ` // ${action.label.replace(/[\r\n]+/g, " ")}` : "";
-      lines.push(`document.querySelector(${JSON.stringify(action.selector)})?.click();${comment}`);
+      lines.push(`${resolveSelectorsSnippet(selectors)}?.click();${comment}`);
       continue;
     }
 
     if (action.type === "setValue") {
-      const sel = JSON.stringify(action.selector);
       const val = JSON.stringify(action.value);
       const comment = action.label ? ` // ${action.label.replace(/[\r\n]+/g, " ")}` : "";
-      lines.push(`(function() { var el = document.querySelector(${sel});${comment}`);
+      lines.push(`(function() { var el = ${resolveSelectorsSnippet(selectors)};${comment}`);
       lines.push(`if (el) { el.value = ${val}; el.dispatchEvent(new Event('input', {bubbles:true})); el.dispatchEvent(new Event('change', {bubbles:true})); }`);
       lines.push(`})();`);
       continue;
     }
 
-    if (action.type === "setChecked") {
-      const sel = JSON.stringify(action.selector);
+    if (action.type === "selectValue") {
+      const val = JSON.stringify(action.value);
       const comment = action.label ? ` // ${action.label.replace(/[\r\n]+/g, " ")}` : "";
-      lines.push(`(function() { var el = document.querySelector(${sel});${comment}`);
+      lines.push(`(function() { var el = ${resolveSelectorsSnippet(selectors)};${comment}`);
+      lines.push(`if (el) { el.value = ${val}; el.dispatchEvent(new Event('change', {bubbles:true})); }`);
+      lines.push(`})();`);
+      continue;
+    }
+
+    if (action.type === "setChecked") {
+      const comment = action.label ? ` // ${action.label.replace(/[\r\n]+/g, " ")}` : "";
+      lines.push(`(function() { var el = ${resolveSelectorsSnippet(selectors)};${comment}`);
       lines.push(`if (el) { el.checked = ${Boolean(action.checked)}; el.dispatchEvent(new Event('change', {bubbles:true})); }`);
       lines.push(`})();`);
       continue;
@@ -1798,17 +1822,33 @@ function convertRecordingToPreactions(actions) {
     }
 
     if (action.type === "click") {
-      preactions.push({ click: action.selector });
+      const cssSelectors = Array.isArray(action.selectors)
+        ? action.selectors.filter((s) => !/^(xpath|aria|pierce|text)\//.test(s))
+        : null;
+      preactions.push({ click: cssSelectors && cssSelectors.length > 1 ? cssSelectors : primarySelector(action) });
       continue;
     }
 
     if (action.type === "setValue") {
-      preactions.push({ type: { field: action.selector, value: action.value } });
+      const cssSelectors = Array.isArray(action.selectors)
+        ? action.selectors.filter((s) => !/^(xpath|aria|pierce|text)\//.test(s))
+        : null;
+      const field = cssSelectors && cssSelectors.length > 1 ? cssSelectors : primarySelector(action);
+      preactions.push({ type: { field, value: action.value } });
+      continue;
+    }
+
+    if (action.type === "selectValue") {
+      const cssSelectors = Array.isArray(action.selectors)
+        ? action.selectors.filter((s) => !/^(xpath|aria|pierce|text)\//.test(s))
+        : null;
+      const field = cssSelectors && cssSelectors.length > 1 ? cssSelectors : primarySelector(action);
+      preactions.push({ select: { field, value: action.value } });
       continue;
     }
 
     if (action.type === "setChecked") {
-      const sel = action.selector.replace(/'/g, "\\'");
+      const sel = primarySelector(action).replace(/'/g, "\\'");
       const checked = Boolean(action.checked);
       preactions.push({
         script: `(function(){var el=document.querySelector('${sel}');if(el&&el.checked!==${checked}){el.checked=${checked};el.dispatchEvent(new Event('change',{bubbles:true}));}})();`,
