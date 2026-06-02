@@ -2663,14 +2663,68 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
   queueMonitorSuggestionsForTab(tabId, "tab-activated", 350);
 });
 
-// Recording state: tabId -> { actions: [], jobId }
+// Recording state: tabId -> { actions: [], jobId, pendingResolutions: [] }
 const recordingState = new Map();
 
 async function injectRecorder(tabId) {
   await chrome.scripting.executeScript({
-    target: { tabId },
+    target: { tabId, allFrames: true },
     files: ["recorder.js"],
   });
+}
+
+async function resolveIframeSelector(tabId, frameId) {
+  try {
+    const frames = await chrome.webNavigation.getAllFrames({ tabId });
+    const frame = frames?.find((f) => f.frameId === frameId);
+    if (!frame) return null;
+    const parentFrameId = frame.parentFrameId;
+    if (parentFrameId == null || parentFrameId < 0) return null;
+    const frameUrl = frame.url;
+
+    const results = await chrome.scripting.executeScript({
+      target: { tabId, frameIds: [parentFrameId] },
+      func: (url) => {
+        const iframes = [...document.querySelectorAll("iframe")];
+        const match = iframes.find((f) => {
+          try {
+            return f.contentWindow?.location?.href === url || f.src === url || new URL(f.src, location.href).href === url;
+          } catch {
+            return false;
+          }
+        });
+        if (!match) return null;
+        if (match.id) return `#${CSS.escape(match.id)}`;
+
+        // Build a path-based unique selector walking up the DOM
+        function segmentFor(el) {
+          if (el.id) return `#${CSS.escape(el.id)}`;
+          const tag = el.tagName.toLowerCase();
+          const siblings = el.parentElement
+            ? [...el.parentElement.children].filter((c) => c.tagName === el.tagName)
+            : [];
+          if (siblings.length > 1) return `${tag}:nth-of-type(${siblings.indexOf(el) + 1})`;
+          return tag;
+        }
+
+        const segments = [segmentFor(match)];
+        let node = match.parentElement;
+        while (node && node !== document.documentElement) {
+          segments.unshift(segmentFor(node));
+          const path = segments.join(" > ");
+          if (document.querySelectorAll(path).length === 1) return path;
+          if (node.id) break;
+          node = node.parentElement;
+        }
+        return segments.join(" > ");
+      },
+      args: [frameUrl],
+    });
+
+    return results?.[0]?.result ?? null;
+  } catch {
+    return null;
+  }
 }
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
@@ -3158,7 +3212,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: false, error: "Valid tabId required to start recording." });
         return;
       }
-      recordingState.set(tabId, { actions: [], jobId: message.payload?.jobId ?? null });
+      recordingState.set(tabId, { actions: [], jobId: message.payload?.jobId ?? null, pendingResolutions: [] });
       try {
         await injectRecorder(tabId);
         sendResponse({ ok: true });
@@ -3172,11 +3226,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message?.type === "stop-recording") {
       const tabId = Number(message.payload?.tabId);
       const rec = recordingState.get(tabId);
-      const actions = rec?.actions ?? [];
       recordingState.delete(tabId);
+      await Promise.allSettled(rec?.pendingResolutions ?? []);
+      const actions = rec?.actions ?? [];
       try {
         await chrome.scripting.executeScript({
-          target: { tabId },
+          target: { tabId, allFrames: true },
           func: () => {
             document.getElementById("__vp-recorder-badge")?.remove();
             window.__vpRecorderInstalled = false;
@@ -3191,7 +3246,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const tabId = Number(sender.tab?.id);
       const rec = recordingState.get(tabId);
       if (rec && message.payload) {
-        rec.actions.push(message.payload);
+        const frameId = sender.frameId;
+        if (frameId && frameId !== 0) {
+          const action = { ...message.payload, iframeSelector: null };
+          rec.actions.push(action);
+          const resolution = resolveIframeSelector(tabId, frameId).then((iframeSelector) => {
+            action.iframeSelector = iframeSelector ?? null;
+          });
+          rec.pendingResolutions.push(resolution);
+        } else {
+          rec.actions.push(message.payload);
+        }
       }
       sendResponse({ ok: true });
       return;

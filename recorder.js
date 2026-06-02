@@ -255,29 +255,31 @@ if (!window.__vpRecorderInstalled) {
     true,
   );
 
-  // Recording badge
-  const badge = document.createElement("div");
-  badge.id = "__vp-recorder-badge";
-  badge.innerHTML = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#ff4444;margin-right:5px;animation:__vp-pulse 1s infinite"></span>REC';
-  badge.style.cssText = [
-    "position:fixed",
-    "top:12px",
-    "right:12px",
-    "z-index:2147483647",
-    "background:rgba(20,10,5,0.82)",
-    "color:#fff",
-    "padding:5px 11px",
-    "border-radius:999px",
-    "font:bold 11px/1.4 sans-serif",
-    "letter-spacing:0.06em",
-    "pointer-events:none",
-    "box-shadow:0 2px 10px rgba(0,0,0,0.4)",
-    "display:flex",
-    "align-items:center",
-  ].join(";");
+  // Recording badge — only show in top frame
+  if (window.self === window.top) {
+    const badge = document.createElement("div");
+    badge.id = "__vp-recorder-badge";
+    badge.innerHTML = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#ff4444;margin-right:5px;animation:__vp-pulse 1s infinite"></span>REC';
+    badge.style.cssText = [
+      "position:fixed",
+      "top:12px",
+      "right:12px",
+      "z-index:2147483647",
+      "background:rgba(20,10,5,0.82)",
+      "color:#fff",
+      "padding:5px 11px",
+      "border-radius:999px",
+      "font:bold 11px/1.4 sans-serif",
+      "letter-spacing:0.06em",
+      "pointer-events:none",
+      "box-shadow:0 2px 10px rgba(0,0,0,0.4)",
+      "display:flex",
+      "align-items:center",
+    ].join(";");
 
-  const style = document.createElement("style");
-  style.textContent = "@keyframes __vp-pulse{0%,100%{opacity:1}50%{opacity:0.3}}";
-  document.head?.appendChild(style);
-  document.documentElement.appendChild(badge);
+    const style = document.createElement("style");
+    style.textContent = "@keyframes __vp-pulse{0%,100%{opacity:1}50%{opacity:0.3}}";
+    document.head?.appendChild(style);
+    document.documentElement.appendChild(badge);
+  }
 }
