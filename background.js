@@ -2663,7 +2663,7 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
   queueMonitorSuggestionsForTab(tabId, "tab-activated", 350);
 });
 
-// Recording state: tabId -> { actions: [], jobId }
+// Recording state: tabId -> { actions: [], jobId, pendingResolutions: [] }
 const recordingState = new Map();
 
 async function injectRecorder(tabId) {
@@ -2695,9 +2695,28 @@ async function resolveIframeSelector(tabId, frameId) {
         });
         if (!match) return null;
         if (match.id) return `#${CSS.escape(match.id)}`;
-        const all = [...document.querySelectorAll("iframe")];
-        const n = all.indexOf(match) + 1;
-        return `iframe:nth-of-type(${n})`;
+
+        // Build a path-based unique selector walking up the DOM
+        function segmentFor(el) {
+          if (el.id) return `#${CSS.escape(el.id)}`;
+          const tag = el.tagName.toLowerCase();
+          const siblings = el.parentElement
+            ? [...el.parentElement.children].filter((c) => c.tagName === el.tagName)
+            : [];
+          if (siblings.length > 1) return `${tag}:nth-of-type(${siblings.indexOf(el) + 1})`;
+          return tag;
+        }
+
+        const segments = [segmentFor(match)];
+        let node = match.parentElement;
+        while (node && node !== document.documentElement) {
+          segments.unshift(segmentFor(node));
+          const path = segments.join(" > ");
+          if (document.querySelectorAll(path).length === 1) return path;
+          if (node.id) break;
+          node = node.parentElement;
+        }
+        return segments.join(" > ");
       },
       args: [frameUrl],
     });
@@ -3193,7 +3212,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: false, error: "Valid tabId required to start recording." });
         return;
       }
-      recordingState.set(tabId, { actions: [], jobId: message.payload?.jobId ?? null });
+      recordingState.set(tabId, { actions: [], jobId: message.payload?.jobId ?? null, pendingResolutions: [] });
       try {
         await injectRecorder(tabId);
         sendResponse({ ok: true });
@@ -3207,8 +3226,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message?.type === "stop-recording") {
       const tabId = Number(message.payload?.tabId);
       const rec = recordingState.get(tabId);
-      const actions = rec?.actions ?? [];
       recordingState.delete(tabId);
+      await Promise.allSettled(rec?.pendingResolutions ?? []);
+      const actions = rec?.actions ?? [];
       try {
         await chrome.scripting.executeScript({
           target: { tabId, allFrames: true },
@@ -3228,9 +3248,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (rec && message.payload) {
         const frameId = sender.frameId;
         if (frameId && frameId !== 0) {
-          resolveIframeSelector(tabId, frameId).then((iframeSelector) => {
-            rec.actions.push({ ...message.payload, iframeSelector: iframeSelector ?? null });
+          const action = { ...message.payload, iframeSelector: null };
+          rec.actions.push(action);
+          const resolution = resolveIframeSelector(tabId, frameId).then((iframeSelector) => {
+            action.iframeSelector = iframeSelector ?? null;
           });
+          rec.pendingResolutions.push(resolution);
         } else {
           rec.actions.push(message.payload);
         }
