@@ -19,17 +19,6 @@ on:
         description: "Publish on the Chrome Web Store after upload (uncheck to upload a draft only)"
         type: boolean
         default: true
-      publish_target:
-        description: "Publish audience — trustedTesters keeps the limited rollout; public targets the public listing"
-        type: choice
-        options:
-          - trustedTesters
-          - public
-        default: trustedTesters
-      prerelease:
-        description: "Mark the GitHub Release as pre-release"
-        type: boolean
-        default: false
 
 jobs:
   release:
@@ -76,7 +65,6 @@ jobs:
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
           name: ${{ steps.ver.outputs.tag }}
-          prerelease: ${{ inputs.prerelease }}
           generate_release_notes: true
           files: ${{ steps.ver.outputs.zip }}
 
@@ -99,10 +87,9 @@ jobs:
             --client-secret "$CWS_CLIENT_SECRET" \
             --refresh-token "$CWS_REFRESH_TOKEN"
 
-      # Publish targets the same audience the item is already distributed to.
-      # The default channel ("public") is only valid once the item has a public
-      # listing; for a Trusted Testers rollout, --trusted-testers is required —
-      # otherwise the API rejects the publish as a distribution-visibility change.
+      # Publishes to the default ("public") channel. The item's visibility is
+      # set to Unlisted on the Web Store dashboard, so this publishes a public
+      # but unlisted listing (installable via direct link, not surfaced in search).
       - name: Publish on Chrome Web Store
         if: ${{ inputs.publish_cws }}
         env:
@@ -112,7 +99,6 @@ jobs:
           CWS_REFRESH_TOKEN: ${{ secrets.CWS_REFRESH_TOKEN }}
         run: |
           npx --yes chrome-webstore-upload-cli@3 publish \
-            ${{ inputs.publish_target == 'trustedTesters' && '--trusted-testers' || '' }} \
             --extension-id "$CWS_EXTENSION_ID" \
             --client-id "$CWS_CLIENT_ID" \
             --client-secret "$CWS_CLIENT_SECRET" \
