@@ -1750,9 +1750,9 @@ function renderRecordedActions() {
   list.scrollTop = list.scrollHeight;
 }
 
-function resolveSelectorsSnippet(selectors) {
+function resolveSelectorsSnippet(selectors, docVar = "document") {
   const list = JSON.stringify(selectors);
-  return `(function(){var ss=${list};for(var i=0;i<ss.length;i++){try{var e=document.querySelector(ss[i]);if(e)return e;}catch(e){}}return null;})()`;
+  return `(function(){var ss=${list};for(var i=0;i<ss.length;i++){try{var e=${docVar}.querySelector(ss[i]);if(e)return e;}catch(e){}}return null;})()`;
 }
 
 function convertRecordingToScript(actions) {
@@ -1761,6 +1761,9 @@ function convertRecordingToScript(actions) {
   const lines = [];
   lines.push(`(async function() {`);
   lines.push(`function wait(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }`);
+  lines.push(`var __doc = document;`);
+
+  let scriptIframeSelector = null;
 
   for (let i = 0; i < actions.length; i++) {
     const action = actions[i];
@@ -1768,7 +1771,19 @@ function convertRecordingToScript(actions) {
 
     if (action.type === "navigate") {
       lines.push(`window.location.href = ${JSON.stringify(action.url)};`);
+      scriptIframeSelector = null;
+      lines.push(`__doc = document;`);
       continue;
+    }
+
+    const actionIframe = action.iframeSelector ?? null;
+    if (actionIframe !== scriptIframeSelector) {
+      if (actionIframe) {
+        lines.push(`__doc = document.querySelector(${JSON.stringify(actionIframe)})?.contentDocument ?? document;`);
+      } else {
+        lines.push(`__doc = document;`);
+      }
+      scriptIframeSelector = actionIframe;
     }
 
     const selectors = Array.isArray(action.selectors)
@@ -1777,14 +1792,14 @@ function convertRecordingToScript(actions) {
 
     if (action.type === "click") {
       const comment = action.label ? ` // ${action.label.replace(/[\r\n]+/g, " ")}` : "";
-      lines.push(`${resolveSelectorsSnippet(selectors)}?.click();${comment}`);
+      lines.push(`${resolveSelectorsSnippet(selectors, "__doc")}?.click();${comment}`);
       continue;
     }
 
     if (action.type === "setValue") {
       const val = JSON.stringify(action.value);
       const comment = action.label ? ` // ${action.label.replace(/[\r\n]+/g, " ")}` : "";
-      lines.push(`(function() { var el = ${resolveSelectorsSnippet(selectors)};${comment}`);
+      lines.push(`(function() { var el = ${resolveSelectorsSnippet(selectors, "__doc")};${comment}`);
       lines.push(`if (el) { el.value = ${val}; el.dispatchEvent(new Event('input', {bubbles:true})); el.dispatchEvent(new Event('change', {bubbles:true})); }`);
       lines.push(`})();`);
       continue;
@@ -1793,7 +1808,7 @@ function convertRecordingToScript(actions) {
     if (action.type === "selectValue") {
       const val = JSON.stringify(action.value);
       const comment = action.label ? ` // ${action.label.replace(/[\r\n]+/g, " ")}` : "";
-      lines.push(`(function() { var el = ${resolveSelectorsSnippet(selectors)};${comment}`);
+      lines.push(`(function() { var el = ${resolveSelectorsSnippet(selectors, "__doc")};${comment}`);
       lines.push(`if (el) { el.value = ${val}; el.dispatchEvent(new Event('change', {bubbles:true})); }`);
       lines.push(`})();`);
       continue;
@@ -1801,7 +1816,7 @@ function convertRecordingToScript(actions) {
 
     if (action.type === "setChecked") {
       const comment = action.label ? ` // ${action.label.replace(/[\r\n]+/g, " ")}` : "";
-      lines.push(`(function() { var el = ${resolveSelectorsSnippet(selectors)};${comment}`);
+      lines.push(`(function() { var el = ${resolveSelectorsSnippet(selectors, "__doc")};${comment}`);
       lines.push(`if (el) { el.checked = ${Boolean(action.checked)}; el.dispatchEvent(new Event('change', {bubbles:true})); }`);
       lines.push(`})();`);
       continue;
@@ -1821,11 +1836,15 @@ function convertRecordingToPreactions(actions) {
       continue;
     }
 
+    const target = action.iframeSelector ?? undefined;
+
     if (action.type === "click") {
       const cssSelectors = Array.isArray(action.selectors)
         ? action.selectors.filter((s) => !/^(xpath|aria|pierce|text)\//.test(s))
         : null;
-      preactions.push({ click: cssSelectors && cssSelectors.length > 1 ? cssSelectors : primarySelector(action) });
+      const preaction = { click: cssSelectors && cssSelectors.length > 1 ? cssSelectors : primarySelector(action) };
+      if (target) preaction.target = target;
+      preactions.push(preaction);
       continue;
     }
 
@@ -1834,7 +1853,9 @@ function convertRecordingToPreactions(actions) {
         ? action.selectors.filter((s) => !/^(xpath|aria|pierce|text)\//.test(s))
         : null;
       const field = cssSelectors && cssSelectors.length > 1 ? cssSelectors : primarySelector(action);
-      preactions.push({ type: { field, value: action.value } });
+      const preaction = { type: { field, value: action.value } };
+      if (target) preaction.target = target;
+      preactions.push(preaction);
       continue;
     }
 
@@ -1843,7 +1864,9 @@ function convertRecordingToPreactions(actions) {
         ? action.selectors.filter((s) => !/^(xpath|aria|pierce|text)\//.test(s))
         : null;
       const field = cssSelectors && cssSelectors.length > 1 ? cssSelectors : primarySelector(action);
-      preactions.push({ select: { field, value: action.value } });
+      const preaction = { select: { field, value: action.value } };
+      if (target) preaction.target = target;
+      preactions.push(preaction);
       continue;
     }
 

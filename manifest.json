@@ -18,7 +18,8 @@
     "tabs",
     "debugger",
     "scripting",
-    "sidePanel"
+    "sidePanel",
+    "webNavigation"
   ],
   "host_permissions": [
     "http://*/*",

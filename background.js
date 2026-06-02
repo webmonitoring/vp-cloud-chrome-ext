@@ -2668,9 +2668,44 @@ const recordingState = new Map();
 
 async function injectRecorder(tabId) {
   await chrome.scripting.executeScript({
-    target: { tabId },
+    target: { tabId, allFrames: true },
     files: ["recorder.js"],
   });
+}
+
+async function resolveIframeSelector(tabId, frameId) {
+  try {
+    const frames = await chrome.webNavigation.getAllFrames({ tabId });
+    const frame = frames?.find((f) => f.frameId === frameId);
+    if (!frame) return null;
+    const parentFrameId = frame.parentFrameId;
+    if (parentFrameId == null || parentFrameId < 0) return null;
+    const frameUrl = frame.url;
+
+    const results = await chrome.scripting.executeScript({
+      target: { tabId, frameIds: [parentFrameId] },
+      func: (url) => {
+        const iframes = [...document.querySelectorAll("iframe")];
+        const match = iframes.find((f) => {
+          try {
+            return f.contentWindow?.location?.href === url || f.src === url || new URL(f.src, location.href).href === url;
+          } catch {
+            return false;
+          }
+        });
+        if (!match) return null;
+        if (match.id) return `#${CSS.escape(match.id)}`;
+        const all = [...document.querySelectorAll("iframe")];
+        const n = all.indexOf(match) + 1;
+        return `iframe:nth-of-type(${n})`;
+      },
+      args: [frameUrl],
+    });
+
+    return results?.[0]?.result ?? null;
+  } catch {
+    return null;
+  }
 }
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
@@ -3176,7 +3211,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       recordingState.delete(tabId);
       try {
         await chrome.scripting.executeScript({
-          target: { tabId },
+          target: { tabId, allFrames: true },
           func: () => {
             document.getElementById("__vp-recorder-badge")?.remove();
             window.__vpRecorderInstalled = false;
@@ -3191,7 +3226,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const tabId = Number(sender.tab?.id);
       const rec = recordingState.get(tabId);
       if (rec && message.payload) {
-        rec.actions.push(message.payload);
+        const frameId = sender.frameId;
+        if (frameId && frameId !== 0) {
+          resolveIframeSelector(tabId, frameId).then((iframeSelector) => {
+            rec.actions.push({ ...message.payload, iframeSelector: iframeSelector ?? null });
+          });
+        } else {
+          rec.actions.push(message.payload);
+        }
       }
       sendResponse({ ok: true });
       return;
