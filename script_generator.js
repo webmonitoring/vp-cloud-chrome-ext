@@ -8,6 +8,8 @@ const state = {
   thinkingEntries: [],
   isRecording: false,
   recordedActions: [],
+  recordingStartTime: null,
+  timerInterval: null,
 };
 
 const elements = {
@@ -26,6 +28,19 @@ const elements = {
   useRecordingActionsDiv: document.querySelector("#use-recording-actions"),
   recordingStatus: document.querySelector("#recording-status"),
   recordedActionsList: document.querySelector("#recorded-actions-list"),
+  // Wizard UI
+  recStep1: document.querySelector("#rec-step-1"),
+  recStep2: document.querySelector("#rec-step-2"),
+  recStep3: document.querySelector("#rec-step-3"),
+  recStep4: document.querySelector("#rec-step-4"),
+  recTimer: document.querySelector("#rec-timer"),
+  recLiveCount: document.querySelector("#rec-live-count"),
+  recCapturedCount: document.querySelector("#rec-captured-count"),
+  recSaveCount: document.querySelector("#rec-save-count"),
+  saveActionsList: document.querySelector("#save-actions-list"),
+  recJobName: document.querySelector("#rec-job-name"),
+  recJobUrl: document.querySelector("#rec-job-url"),
+  recJobId: document.querySelector("#rec-job-id"),
 };
 
 const EXECUTE_SCRIPT_TOOL = Object.freeze({
@@ -114,6 +129,20 @@ function updateContextText() {
 
   const label = state.context.jobId ? `Job #${state.context.jobId}` : "Visualping job editor";
   elements.jobContext.textContent = `${label} | ${state.context.url}`;
+
+  if (elements.recJobName) {
+    elements.recJobName.textContent = state.context.description || state.context.url;
+  }
+  if (elements.recJobUrl) {
+    try {
+      elements.recJobUrl.textContent = new URL(state.context.url).hostname;
+    } catch {
+      elements.recJobUrl.textContent = state.context.url;
+    }
+  }
+  if (elements.recJobId && state.context.jobId) {
+    elements.recJobId.textContent = `#${state.context.jobId}`;
+  }
 }
 
 function getContextFromLocation() {
@@ -1694,18 +1723,100 @@ async function handleSave() {
 }
 
 function setRecordingStatus(type, message) {
+  if (!elements.recordingStatus) return;
   elements.recordingStatus.textContent = message;
-  elements.recordingStatus.className = "status";
+  elements.recordingStatus.className = "status rec-status";
   if (type === "success") elements.recordingStatus.classList.add("is-success");
   else if (type === "warning") elements.recordingStatus.classList.add("is-warning");
   else if (type === "error") elements.recordingStatus.classList.add("is-error");
 }
 
+function setStepState(el, state) {
+  if (!el) return;
+  el.classList.remove("is-active", "is-done", "is-visible");
+  if (state) el.classList.add(state);
+}
+
 function refreshRecordingButtonState() {
-  elements.startRecordButton.disabled = state.isRecording || !state.context;
-  elements.stopRecordButton.disabled = !state.isRecording;
-  elements.startRecordButton.textContent = state.isRecording ? "Recording..." : "Start Recording";
-  elements.useRecordingActionsDiv.hidden = state.isRecording || state.recordedActions.length === 0;
+  if (elements.startRecordButton) {
+    elements.startRecordButton.disabled = state.isRecording || !state.context;
+  }
+  if (elements.stopRecordButton) {
+    elements.stopRecordButton.disabled = !state.isRecording;
+  }
+}
+
+function startRecordingTimer() {
+  state.recordingStartTime = Date.now();
+  clearInterval(state.timerInterval);
+  state.timerInterval = setInterval(() => {
+    if (!elements.recTimer) return;
+    const elapsed = Math.floor((Date.now() - state.recordingStartTime) / 1000);
+    const mins = Math.floor(elapsed / 60);
+    const secs = String(elapsed % 60).padStart(2, "0");
+    elements.recTimer.textContent = `${mins}:${secs}`;
+  }, 1000);
+}
+
+function stopRecordingTimer() {
+  clearInterval(state.timerInterval);
+  state.timerInterval = null;
+  state.recordingStartTime = null;
+}
+
+function renderSaveActions() {
+  const list = elements.saveActionsList;
+  if (!list) return;
+  const actions = state.recordedActions;
+  const count = actions.length;
+
+  if (elements.recCapturedCount) elements.recCapturedCount.textContent = count;
+  if (elements.recSaveCount) elements.recSaveCount.textContent = count;
+
+  list.innerHTML = actions
+    .map((action, i) => {
+      const label = actionSaveLabel(action);
+      const sub = actionSaveSub(action);
+      return `<li class="save-action-item">
+        <div class="save-action-thumb"></div>
+        <div class="save-action-body">
+          <div class="save-action-label">${escapeHtml(label)}</div>
+          ${sub ? `<div class="save-action-sub">${escapeHtml(sub)}</div>` : ""}
+        </div>
+        <button class="save-action-delete" data-index="${i}" title="Remove" type="button">&#x2715;</button>
+      </li>`;
+    })
+    .join("");
+
+  list.querySelectorAll(".save-action-delete").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const idx = Number(btn.dataset.index);
+      state.recordedActions.splice(idx, 1);
+      renderSaveActions();
+    });
+  });
+}
+
+function actionSaveLabel(action) {
+  switch (action.type) {
+    case "navigate": return `Navigated to ${action.label || action.url}`;
+    case "click":    return `Clicked${action.label ? ` "${action.label}"` : " element"}`;
+    case "setValue": return `Typed "${action.value}"${action.label ? ` in "${action.label}"` : ""}`;
+    case "selectValue": return `Selected "${action.value}"${action.label ? ` in "${action.label}"` : ""}`;
+    case "setChecked": return `${action.checked ? "Checked" : "Unchecked"}${action.label ? ` "${action.label}"` : " element"}`;
+    default: return action.type;
+  }
+}
+
+function actionSaveSub(action) {
+  if (action.type === "navigate") {
+    try { return new URL(action.url).hostname; } catch { return action.url; }
+  }
+  return "";
+}
+
+function escapeHtml(str) {
+  return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
 function primarySelector(action) {
@@ -1734,6 +1845,11 @@ function actionLabel(action) {
 function renderRecordedActions() {
   const list = elements.recordedActionsList;
   const actions = state.recordedActions;
+  const count = actions.length;
+
+  if (elements.recLiveCount) {
+    elements.recLiveCount.textContent = `${count} action${count === 1 ? "" : "s"}`;
+  }
 
   if (actions.length === 0) {
     list.innerHTML = "";
@@ -1927,10 +2043,15 @@ async function handleStartRecording() {
     state.isRecording = true;
     state.recordedActions = [];
     renderRecordedActions();
-    setRecordingStatus("", "Recording… interact with the page");
-    document.querySelector("#recording-panel")?.classList.add("is-recording");
+    setRecordingStatus("", "");
     refreshRecordingButtonState();
 
+    setStepState(elements.recStep1, "is-done");
+    setStepState(elements.recStep2, "is-active");
+    setStepState(elements.recStep3, "is-visible");
+    setStepState(elements.recStep4, null);
+
+    startRecordingTimer();
     void pollRecordingActions();
   } catch (error) {
     setRecordingStatus("error", error instanceof Error ? error.message : String(error));
@@ -1940,7 +2061,7 @@ async function handleStartRecording() {
 async function handleStopRecording() {
   state.isRecording = false;
   clearTimeout(recordingPollTimer);
-  document.querySelector("#recording-panel")?.classList.remove("is-recording");
+  stopRecordingTimer();
 
   try {
     const tabId = await resolveTargetTabId();
@@ -1956,15 +2077,69 @@ async function handleStopRecording() {
   } catch (_error) {}
 
   renderRecordedActions();
+  renderSaveActions();
+  refreshRecordingButtonState();
+
+  setStepState(elements.recStep1, "is-done");
+  setStepState(elements.recStep2, "is-done");
+  setStepState(elements.recStep3, "is-done");
+  setStepState(elements.recStep4, "is-active");
 
   const count = state.recordedActions.length;
   if (count === 0) {
-    setRecordingStatus("warning", "Recording stopped. No actions were captured.");
+    setRecordingStatus("warning", "No actions were captured.");
   } else {
-    setRecordingStatus("success", `Recording stopped. ${count} action${count === 1 ? "" : "s"} captured.`);
+    setRecordingStatus("", "");
   }
+}
 
+async function handleDiscard() {
+  // Reset UI immediately
+  state.recordedActions = [];
+  renderRecordedActions();
+  renderSaveActions();
+  setRecordingStatus("", "");
+  if (elements.recTimer) elements.recTimer.textContent = "0:00";
+
+  setStepState(elements.recStep1, "is-active");
+  setStepState(elements.recStep2, null);
+  setStepState(elements.recStep3, null);
+  setStepState(elements.recStep4, null);
   refreshRecordingButtonState();
+
+  if (!state.context?.url) return;
+
+  try {
+    const tabId = await resolveTargetTabId();
+    const targetUrl = state.context.url;
+
+    // Clear all cookies for the target origin
+    const cookies = await chrome.cookies.getAll({ url: targetUrl });
+    await Promise.all(
+      cookies.map((cookie) => {
+        const scheme = cookie.secure ? "https" : "http";
+        const domain = cookie.domain.replace(/^\./, "");
+        return chrome.cookies.remove({
+          url: `${scheme}://${domain}${cookie.path}`,
+          name: cookie.name,
+        });
+      }),
+    );
+
+    // Clear localStorage and sessionStorage on the page
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        try { localStorage.clear(); } catch (_) {}
+        try { sessionStorage.clear(); } catch (_) {}
+      },
+    });
+
+    // Navigate back to the original URL
+    await chrome.tabs.update(tabId, { url: targetUrl });
+  } catch (error) {
+    setRecordingStatus("error", error instanceof Error ? error.message : String(error));
+  }
 }
 
 function handleUseRecording() {
@@ -2104,6 +2279,10 @@ elements.useRecordingButton.addEventListener("click", () => {
 
 elements.saveAsPreactionsButton.addEventListener("click", () => {
   void handleSaveAsPreactions();
+});
+
+document.querySelector("#discard-recording")?.addEventListener("click", () => {
+  void handleDiscard();
 });
 
 void initialize();

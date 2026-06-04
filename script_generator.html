@@ -7,49 +7,163 @@
     <link rel="stylesheet" href="script_generator.css" />
   </head>
   <body>
+    <header class="topbar">
+      <div class="topbar-left">
+        <img class="topbar-logo" src="icons/logo.svg" alt="Visualping" />
+        <span class="topbar-title">Visualping Cloud Jobs</span>
+      </div>
+      <div class="topbar-right">
+        <button class="topbar-icon-btn" type="button" title="Notifications" aria-label="Notifications">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M13.73 21a2 2 0 0 1-3.46 0" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+        <button class="topbar-icon-btn" type="button" title="Close" aria-label="Close" onclick="window.close()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M18 6 6 18M6 6l12 12" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </div>
+    </header>
     <main class="shell">
       <header class="header">
         <p class="eyebrow">Visualping</p>
-        <h1>Script Action Generator</h1>
+        <h1>Record Actions</h1>
         <p id="job-context" class="context">Loading job context...</p>
       </header>
 
-      <section class="panel recording-panel" id="recording-panel">
-        <label class="label">Record Actions</label>
-        <p class="record-hint">Interact with the page while recording — clicks, form inputs, and navigation are captured. Then convert them into a reusable script.</p>
-        <div class="actions record-controls">
-          <button id="start-recording" class="button-record" type="button">Start Recording</button>
-          <button id="stop-recording" class="button-stop" type="button" disabled>Stop Recording</button>
-        </div>
-        <p id="recording-status" class="status"></p>
-        <ol id="recorded-actions-list" class="recorded-actions-list"></ol>
-        <div id="use-recording-actions" class="actions use-recording-actions" hidden>
-          <button id="use-recording" class="button-ghost" type="button">Convert to Script</button>
-          <button id="save-as-preactions" class="button-ghost" type="button">Save as Actions</button>
-        </div>
-      </section>
-
-      <section class="panel">
-        <label for="action-request" class="label">What should happen on this page?</label>
-        <textarea
-          id="action-request"
-          placeholder="Example: Open the date filter, choose 'Last 7 days', and click Apply"
-        ></textarea>
-
-        <div class="actions">
-          <button id="generate-script" class="button-primary" type="button">Generate Script</button>
-          <button id="stop-generation" class="button-stop" type="button" disabled>Stop</button>
-          <button id="save-script" class="button-ghost" type="button" disabled>Save To Job</button>
+      <section class="recording-panel" id="recording-panel">
+        <div class="rec-job-card" id="rec-job-card">
+          <div class="rec-job-favicon" id="rec-job-favicon"></div>
+          <div class="rec-job-info">
+            <span class="rec-job-name" id="rec-job-name">Loading…</span>
+            <span class="rec-job-url" id="rec-job-url"></span>
+          </div>
+          <span class="rec-job-id" id="rec-job-id"></span>
         </div>
 
-        <p id="status" class="status">Enter an action and generate a script.</p>
-        <pre id="thinking-log" class="thinking-log" aria-live="polite"></pre>
+        <ol class="rec-steps">
+          <li class="rec-step is-active" id="rec-step-1">
+            <div class="rec-step-left">
+              <div class="rec-step-indicator">
+                <span class="rec-step-number">1</span>
+                <svg class="rec-step-check" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M2 6.5l2.8 2.8 5.2-5.6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </div>
+              <div class="rec-step-line"></div>
+            </div>
+            <div class="rec-step-body">
+              <div class="rec-step-header">
+                <span class="rec-step-title">Start recording</span>
+                <span class="rec-step-done-badge">Done</span>
+              </div>
+              <div class="rec-step-content">
+                <p class="rec-step-desc">We'll capture every click, text entry and page navigation as a replayable step.</p>
+                <button id="start-recording" class="button-record-big" type="button">
+                  <span class="rec-dot-btn"></span>Start recording
+                </button>
+              </div>
+            </div>
+          </li>
+
+          <li class="rec-step" id="rec-step-2">
+            <div class="rec-step-left">
+              <div class="rec-step-indicator">
+                <span class="rec-step-number">2</span>
+                <svg class="rec-step-check" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M2 6.5l2.8 2.8 5.2-5.6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </div>
+              <div class="rec-step-line"></div>
+            </div>
+            <div class="rec-step-body">
+              <div class="rec-step-header">
+                <span class="rec-step-title">Interact with the page</span>
+                <span class="rec-step-done-badge">Done</span>
+              </div>
+              <div class="rec-step-content">
+                <div class="rec-live-indicator" id="rec-live-indicator">
+                  <span class="rec-live-dot"></span>
+                  <span class="rec-live-label">Recording</span>
+                  <span class="rec-live-sep">·</span>
+                  <span id="rec-timer">0:00</span>
+                  <span class="rec-live-sep">·</span>
+                  <span id="rec-live-count">0 actions</span>
+                </div>
+                <ol id="recorded-actions-list" class="recorded-actions-list"></ol>
+              </div>
+            </div>
+          </li>
+
+          <li class="rec-step" id="rec-step-3">
+            <div class="rec-step-left">
+              <div class="rec-step-indicator">
+                <span class="rec-step-number">3</span>
+                <svg class="rec-step-check" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M2 6.5l2.8 2.8 5.2-5.6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </div>
+              <div class="rec-step-line"></div>
+            </div>
+            <div class="rec-step-body">
+              <div class="rec-step-header">
+                <span class="rec-step-title">Stop recording</span>
+                <span class="rec-step-done-badge">Done</span>
+              </div>
+              <div class="rec-step-content">
+                <p class="rec-step-desc">Done interacting? Stop to review the steps you captured.</p>
+                <button id="stop-recording" class="button-stop-big" type="button">
+                  <span class="stop-sq"></span>Stop recording
+                </button>
+              </div>
+            </div>
+          </li>
+
+          <li class="rec-step" id="rec-step-4">
+            <div class="rec-step-left">
+              <div class="rec-step-indicator">
+                <span class="rec-step-number">4</span>
+                <svg class="rec-step-check" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M2 6.5l2.8 2.8 5.2-5.6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </div>
+            </div>
+            <div class="rec-step-body">
+              <div class="rec-step-header">
+                <span class="rec-step-title">Save to actions</span>
+              </div>
+              <div class="rec-step-content">
+                <p class="rec-step-desc">Review your <span id="rec-captured-count">0</span> captured steps — remove any you don't want.</p>
+                <ol id="save-actions-list" class="save-actions-list"></ol>
+                <button id="save-as-preactions" class="button-save-big" type="button">
+                  <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M3 8.5l3.5 3.5 6.5-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                  Save <span id="rec-save-count">0</span> actions to job
+                </button>
+                <button id="discard-recording" class="button-link-discard" type="button">Discard &amp; record again</button>
+                <button id="use-recording" class="button-link-script" type="button">Convert to script instead</button>
+              </div>
+            </div>
+          </li>
+        </ol>
+
+        <p id="recording-status" class="status rec-status"></p>
+        <div id="use-recording-actions" hidden></div>
       </section>
 
-      <section class="panel">
-        <label for="generated-script" class="label">Generated script</label>
-        <textarea id="generated-script" readonly placeholder="Generated script will appear here"></textarea>
-      </section>
+      <!-- hidden stubs keep JS element refs valid -->
+      <div hidden>
+        <textarea id="action-request"></textarea>
+        <button id="generate-script"></button>
+        <button id="stop-generation"></button>
+        <button id="save-script"></button>
+        <p id="status"></p>
+        <pre id="thinking-log"></pre>
+        <textarea id="generated-script"></textarea>
+      </div>
     </main>
 
     <script type="module" src="script_generator.js"></script>
