@@ -1774,18 +1774,13 @@ function renderSaveActions() {
   if (elements.recSaveCount) elements.recSaveCount.textContent = count;
 
   list.innerHTML = actions
-    .map((action, i) => {
-      const label = actionSaveLabel(action);
-      const sub = actionSaveSub(action);
-      return `<li class="save-action-item">
-        <div class="save-action-thumb"></div>
-        <div class="save-action-body">
-          <div class="save-action-label">${escapeHtml(label)}</div>
-          ${sub ? `<div class="save-action-sub">${escapeHtml(sub)}</div>` : ""}
-        </div>
+    .map((action, i) =>
+      `<li class="action-item action-type-${action.type}">
+        <span class="action-index">${i + 1}</span>
+        <span class="action-text">${escapeHtml(actionLabel(action))}</span>
         <button class="save-action-delete" data-index="${i}" title="Remove" type="button">&#x2715;</button>
-      </li>`;
-    })
+      </li>`,
+    )
     .join("");
 
   list.querySelectorAll(".save-action-delete").forEach((btn) => {

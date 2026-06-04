@@ -360,6 +360,8 @@ button:disabled {
 .rec-step-body {
   flex: 1;
   min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
   padding-bottom: 16px;
 }
 
@@ -394,6 +396,8 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  width: 100%;
+  min-width: 0;
 }
 
 /* Hide content by default — only show when active or visible */
@@ -471,6 +475,7 @@ button:disabled {
   justify-content: center;
   gap: 8px;
   width: 100%;
+  max-width: 100%;
   padding: 11px 16px;
   border: 0;
   border-radius: 999px;
@@ -550,7 +555,7 @@ button:disabled {
 
 .action-item {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 6px;
   padding: 4px 8px;
   border-radius: 7px;
@@ -558,6 +563,8 @@ button:disabled {
   border: 1px solid var(--vp-line);
   font-size: 11px;
   line-height: 1.4;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .action-index {
@@ -591,6 +598,7 @@ button:disabled {
   justify-content: center;
   gap: 8px;
   width: 100%;
+  max-width: 100%;
   padding: 11px 16px;
   border: 2px solid var(--vp-blue);
   border-radius: 999px;
@@ -637,6 +645,8 @@ button:disabled {
   border: 1px solid var(--vp-line);
   font-size: 12px;
   line-height: 1.4;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .save-action-thumb {
@@ -684,6 +694,7 @@ button:disabled {
   padding: 0;
   font-size: 14px;
   line-height: 1;
+  font-weight: normal;
   transition: background 0.1s, color 0.1s;
 }
 
@@ -699,6 +710,7 @@ button:disabled {
   justify-content: center;
   gap: 7px;
   width: 100%;
+  max-width: 100%;
   padding: 11px 16px;
   border: 0;
   border-radius: 999px;
@@ -730,6 +742,8 @@ button:disabled {
   cursor: pointer;
   text-align: center;
   padding: 2px 0;
+  width: 100%;
+  max-width: 100%;
   text-decoration: underline;
   text-underline-offset: 2px;
 }
@@ -747,6 +761,8 @@ button:disabled {
   cursor: pointer;
   text-align: center;
   padding: 2px 0;
+  width: 100%;
+  max-width: 100%;
   opacity: 0.7;
 }
 

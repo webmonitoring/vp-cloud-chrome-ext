@@ -13,13 +13,7 @@
         <span class="topbar-title">Visualping Cloud Jobs</span>
       </div>
       <div class="topbar-right">
-        <button class="topbar-icon-btn" type="button" title="Notifications" aria-label="Notifications">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-            <path d="M13.73 21a2 2 0 0 1-3.46 0" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-        </button>
-        <button class="topbar-icon-btn" type="button" title="Close" aria-label="Close" onclick="window.close()">
+<button class="topbar-icon-btn" type="button" title="Close" aria-label="Close" onclick="window.close()">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
             <path d="M18 6 6 18M6 6l12 12" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
           </svg>
@@ -27,22 +21,7 @@
       </div>
     </header>
     <main class="shell">
-      <header class="header">
-        <p class="eyebrow">Visualping</p>
-        <h1>Record Actions</h1>
-        <p id="job-context" class="context">Loading job context...</p>
-      </header>
-
       <section class="recording-panel" id="recording-panel">
-        <div class="rec-job-card" id="rec-job-card">
-          <div class="rec-job-favicon" id="rec-job-favicon"></div>
-          <div class="rec-job-info">
-            <span class="rec-job-name" id="rec-job-name">Loading…</span>
-            <span class="rec-job-url" id="rec-job-url"></span>
-          </div>
-          <span class="rec-job-id" id="rec-job-id"></span>
-        </div>
-
         <ol class="rec-steps">
           <li class="rec-step is-active" id="rec-step-1">
             <div class="rec-step-left">
@@ -57,7 +36,6 @@
             <div class="rec-step-body">
               <div class="rec-step-header">
                 <span class="rec-step-title">Start recording</span>
-                <span class="rec-step-done-badge">Done</span>
               </div>
               <div class="rec-step-content">
                 <p class="rec-step-desc">We'll capture every click, text entry and page navigation as a replayable step.</p>
@@ -81,7 +59,6 @@
             <div class="rec-step-body">
               <div class="rec-step-header">
                 <span class="rec-step-title">Interact with the page</span>
-                <span class="rec-step-done-badge">Done</span>
               </div>
               <div class="rec-step-content">
                 <div class="rec-live-indicator" id="rec-live-indicator">
@@ -110,7 +87,6 @@
             <div class="rec-step-body">
               <div class="rec-step-header">
                 <span class="rec-step-title">Stop recording</span>
-                <span class="rec-step-done-badge">Done</span>
               </div>
               <div class="rec-step-content">
                 <p class="rec-step-desc">Done interacting? Stop to review the steps you captured.</p>
@@ -144,7 +120,7 @@
                   Save <span id="rec-save-count">0</span> actions to job
                 </button>
                 <button id="discard-recording" class="button-link-discard" type="button">Discard &amp; record again</button>
-                <button id="use-recording" class="button-link-script" type="button">Convert to script instead</button>
+
               </div>
             </div>
           </li>
@@ -156,6 +132,12 @@
 
       <!-- hidden stubs keep JS element refs valid -->
       <div hidden>
+        <p id="job-context"></p>
+        <div id="rec-job-favicon"></div>
+        <span id="rec-job-name"></span>
+        <span id="rec-job-url"></span>
+        <span id="rec-job-id"></span>
+        <button id="use-recording"></button>
         <textarea id="action-request"></textarea>
         <button id="generate-script"></button>
         <button id="stop-generation"></button>
