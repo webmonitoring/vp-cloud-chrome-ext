@@ -34,7 +34,9 @@ import {
   getVisualpingJob,
   listSavedJobPresetsForUi,
   listSavedJobSettings,
+  mapLocalStorageValuesToPreactions,
   mergeCookieActionsIntoPreactions,
+  omitLargeActionsIfNeeded,
   listVisualpingJobs,
   listVisualpingLabels,
   updateVisualpingJob,
@@ -1574,6 +1576,19 @@ async function getCookiesForPage(url) {
   return cookies.filter((cookie) => cookie.name && cookie.domain);
 }
 
+async function getLocalStorageForTab(tab) {
+  if (!tab?.id) return {};
+  try {
+    const [result] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => JSON.stringify(localStorage),
+    });
+    return JSON.parse(result.result);
+  } catch {
+    return {};
+  }
+}
+
 async function requireSession(config) {
   const session = await checkVisualpingSession(config);
   if (!session.loggedIn || !session.token) {
@@ -2027,7 +2042,7 @@ async function buildPopupState() {
   };
 }
 
-async function applyCreatedJobFollowUps(config, session, { jobId, workspaceId, alertCondition, cookies }) {
+async function applyCreatedJobFollowUps(config, session, { jobId, workspaceId, alertCondition, cookies, localStorageActions = [] }) {
   const payload = {};
   if (alertCondition?.trim()) {
     payload.summalyzer = {
@@ -2036,13 +2051,18 @@ async function applyCreatedJobFollowUps(config, session, { jobId, workspaceId, a
     };
   }
 
-  if (cookies.length) {
+  if (cookies.length || localStorageActions.length) {
     const jobDetails = await getVisualpingJob(config, session.token, jobId, {
       workspaceId: workspaceId ?? undefined,
     });
     payload.skipInitialRun = true;
     payload.enable_cookies_and_ad_blocker = true;
-    payload.preactions = mergeCookieActionsIntoPreactions(jobDetails.preactions, cookies);
+    const mergedPreactions = mergeCookieActionsIntoPreactions(jobDetails.preactions, cookies);
+    if (localStorageActions.length) {
+      mergedPreactions.actions = [...mergedPreactions.actions, ...localStorageActions];
+      omitLargeActionsIfNeeded(mergedPreactions.actions);
+    }
+    payload.preactions = mergedPreactions;
   }
 
   if (!Object.keys(payload).length) {
@@ -2077,7 +2097,11 @@ async function createJobForActiveTab({
 
   const session = await requireSession(config);
   const accountKey = requireSessionAccountKey(session);
-  const cookies = await getCookiesForPage(tab.url);
+  const [cookies, localStorageValues] = await Promise.all([
+    getCookiesForPage(tab.url),
+    getLocalStorageForTab(tab),
+  ]);
+  const localStorageActions = mapLocalStorageValuesToPreactions(localStorageValues);
   const fallbackWorkspaceId = getPreferredWorkspaceId(session);
   const workspaceId = Number.isFinite(Number(requestedWorkspaceId)) && Number(requestedWorkspaceId) > 0
     ? Number(requestedWorkspaceId)
@@ -2113,6 +2137,7 @@ async function createJobForActiveTab({
       workspaceId,
       alertCondition,
       cookies,
+      localStorageActions,
     });
   } else {
     const payload = buildCreateJobPayload({
@@ -2122,6 +2147,7 @@ async function createJobForActiveTab({
       interval,
       cookies,
       workspaceId,
+      localStorageActions,
     });
 
     response = await createVisualpingJob(config, session.token, payload);
