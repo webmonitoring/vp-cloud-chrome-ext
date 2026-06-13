@@ -23,6 +23,6 @@
   "homepage": "https://github.com/webmonitoring/vp-cloud-chrome-ext#readme",
   "devDependencies": {
     "@huggingface/transformers": "^4.2.0",
-    "esbuild": "^0.28.0"
+    "esbuild": "^0.28.1"
   }
 }
